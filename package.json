@@ -24,16 +24,16 @@
   "license": "MIT",
   "author": {
     "name": "Lean Cabrera",
-    "url": "https://github.com/leancabrera"
+    "url": "https://github.com/leandr0ck"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/leancabrera/pi-spec-flow.git"
+    "url": "git+https://github.com/leandr0ck/pi-spec-flow.git"
   },
   "bugs": {
-    "url": "https://github.com/leancabrera/pi-spec-flow/issues"
+    "url": "https://github.com/leandr0ck/pi-spec-flow/issues"
   },
-  "homepage": "https://github.com/leancabrera/pi-spec-flow#readme",
+  "homepage": "https://github.com/leandr0ck/pi-spec-flow#readme",
   "engines": {
     "node": ">=20"
   },
