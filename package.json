@@ -1,0 +1,51 @@
+{
+  "name": "pi-spec-flow",
+  "version": "0.1.0",
+  "description": "Pi extension that turns a technical spec into structured implementation tickets stored as Markdown files.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/",
+    "skills/planning-methodology/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "spec",
+    "tickets",
+    "planning",
+    "task-breakdown"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Lean Cabrera",
+    "url": "https://github.com/leancabrera"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leancabrera/pi-spec-flow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/leancabrera/pi-spec-flow/issues"
+  },
+  "homepage": "https://github.com/leancabrera/pi-spec-flow#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

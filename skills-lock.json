@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "pi-extension-authoring": {
+      "source": "romiluz13/pi-agent-skills",
+      "sourceType": "github",
+      "skillPath": "pi-skills/pi-extension-authoring/SKILL.md",
+      "computedHash": "dbb86f8a9e664027bcbb2a2293745e124d36c38a7fcc8273353b19b1a583b6af"
+    }
+  }
+}
