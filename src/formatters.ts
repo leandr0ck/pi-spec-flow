@@ -77,6 +77,26 @@ export function formatTicketFull(t: Ticket): string {
     lines.push(`**Open Questions:** ${t.open_questions}`);
   }
 
+  const hasHandoff = !!(
+    t.handoff_summary ||
+    t.handoff_files ||
+    t.handoff_decisions ||
+    t.handoff_verification ||
+    t.handoff_risks ||
+    t.handoff_next_ticket
+  );
+
+  if (hasHandoff) {
+    lines.push("");
+    lines.push("**Implementation Handoff:**");
+    if (t.handoff_summary) lines.push(`- Summary: ${t.handoff_summary}`);
+    if (t.handoff_files) lines.push(`- Files changed: ${t.handoff_files}`);
+    if (t.handoff_decisions) lines.push(`- Decisions: ${t.handoff_decisions}`);
+    if (t.handoff_verification) lines.push(`- Verification result: ${t.handoff_verification}`);
+    if (t.handoff_risks) lines.push(`- Pending risks: ${t.handoff_risks}`);
+    if (t.handoff_next_ticket) lines.push(`- Next ticket: ${t.handoff_next_ticket}`);
+  }
+
   lines.push("");
   lines.push(`Spec: ${t.spec_file} → ${t.source_section}`);
   lines.push(`Created: ${t.created_at} | Updated: ${t.updated_at}`);

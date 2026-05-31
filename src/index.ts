@@ -13,13 +13,14 @@
  *
  * Commands:
  *   /spec-flow-init <path>  — Read a spec and guide the LLM to create structured tickets
- *   /spec-flow-list         — List all tickets with phases and status
- *   /spec-flow-next         — Show next pending ticket with full context
+ *   /spec-flow-next         — Show next pending ticket (supports --new and --feature)
+ *   /spec-flow-implement    — Start implementation flow ticket-by-ticket in isolated sessions
+ *   /spec-flow-start         — Alias of /spec-flow-implement
  *
  * Tools (for LLM):
- *   spec_flow_query   — Query tickets by status or ID
  *   spec_flow_create  — Create a ticket with full planning fields
- *   spec_flow_update  — Update ticket status
+ *   spec_flow_update  — Update ticket status (supports auto_next chaining)
+ *   spec_flow_handoff_loop_done — Validate handoff and close ticket safely
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCommands } from "./commands.js";

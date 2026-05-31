@@ -25,6 +25,20 @@
 
 ## Development Rules (Spec Flow Extension)
 
+## Project Philosophy
+
+1. **More planning, less implementation**
+   - Invest in ticket quality, acceptance criteria, verification, and sequencing before coding.
+   - Better planning reduces rework, saves tokens, and improves output quality.
+
+2. **Avoid context rot to improve quality**
+   - Prefer isolated, ticket-by-ticket execution with explicit handoffs.
+   - Persist decisions in tickets/spec docs; do not rely on long chat memory.
+
+3. **Token efficiency and pragmatic execution**
+   - Minimize output verbosity and avoid unnecessary tool calls.
+   - Be concise, action-oriented, and optimize for signal over noise.
+
 1. **Always read Pi extension docs first** before changing architecture, APIs, events, tools, or resources.
    - Main: `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md`
    - Examples: `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/`
@@ -43,8 +57,6 @@
 
 4. If adding new runtime resources (skills/prompts/themes), register through `resources_discover` in `src/events.ts`.
 
-5.
-6. Preserve backward-safe UX commands:
+5. Preserve backward-safe UX commands:
    - `/spec-flow-init`
-   - `/spec-flow-list`
    - `/spec-flow-next`

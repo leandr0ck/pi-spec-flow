@@ -2,59 +2,104 @@
 
 Pi extension that turns a technical spec into structured implementation tickets stored as Markdown files.
 
-## Install (local dev)
+## Install
 
 ```bash
-npm install
+pi install pi-spec-flow@latest
 ```
 
-Pi loads extension from `package.json`:
+Pi will auto-discover the extension via `pi.extensions` in `package.json`.
 
-```json
-{
-  "pi": {
-    "extensions": ["./src/index.ts"]
-  }
-}
+## Quick start
+
+```text
+1. /spec-flow-init my-spec.md      ← Planning (generates tickets)
+2. /spec-flow-implement             ← Implementation (opens ticket sessions)
 ```
 
-## Features
+## Workflow
 
-- `/spec-flow-init <spec.md>`: parse spec and trigger ticket planning
-- `/spec-flow-list`: list tickets by phase and status
-- `/spec-flow-next`: show next pending ticket
-- LLM tools:
-  - `spec_flow_create`
-  - `spec_flow_query`
-  - `spec_flow_update`
+### 1) Planning
 
-## Planning
+```text
+/spec-flow-init <spec.md>
+```
 
-Ticket planning is enforced by the extension as a guided state machine (not left to LLM discretion).
+The extension reads the spec and guides the LLM to create structured, validated tickets following a planning methodology. Tickets are created one by one with a validation loop that ensures each one has acceptance criteria, verification steps, estimated scope, and phase.
 
-### Per-ticket loop
+If tickets already exist for that spec, you'll be prompted to replace them.
 
-1. Create one ticket (`spec_flow_create`)
-2. Validate that exact ticket (`spec_flow_ticket_loop_done`)
-3. If validation fails:
-   - delete failed ticket (`spec_flow_delete`)
-   - recreate corrected ticket (`spec_flow_create`)
-   - validate again (`spec_flow_ticket_loop_done`)
-4. If validation passes, move to the next ticket and repeat
-5. After all tickets pass individually, run global validation (`spec_flow_validate_tickets`) for cross-cutting checks (dependencies/checkpoints)
+### 2) Implementation
 
-### Flow diagram
+```text
+/spec-flow-implement          (or /spec-flow-start)
+```
+
+Opens a new isolated session scoped to one ticket. When the ticket is completed, the next one is automatically queued.
+
+**Per-ticket flow:**
+
+```text
+1. Start:        spec_flow_update(id: X, status: "in_progress")
+2. Implement:    code within the ticket scope only
+3. Handoff:      spec_flow_update(id: X, handoff_summary: "...", handoff_files: "...", handoff_decisions: "...", handoff_verification: "...", handoff_risks: "None", handoff_next_ticket: "...")
+4. Close:        spec_flow_handoff_loop_done(ticket_id: X, spec_file: "my-spec.md")
+```
+
+If the handoff fields are incomplete, a fix loop starts and you're prompted to complete them before the ticket is marked done.
+
+### Feature selection
+
+When multiple features have pending tickets, `/spec-flow-implement` asks you to choose. You can also pass the feature explicitly:
+
+```text
+/spec-flow-implement --feature=checkout.md
+/spec-flow-implement --feature=checkout
+/spec-flow-next --new --feature=checkout.md
+```
+
+If only one feature has unfinished tickets, it's selected automatically.
+
+## Commands reference
+
+| Command | Description |
+|---------|-------------|
+| `/spec-flow-init <spec.md>` | Generate validated tickets from a spec |
+| `/spec-flow-implement` | Start implementation (opens ticket sessions) |
+| `/spec-flow-start` | Alias for `/spec-flow-implement` |
+| `/spec-flow-next` | Show next pending ticket (or open it with `--new`) |
+
+## Tools reference
+
+The extension also exposes these tools for programmatic access:
+
+| Tool | Description |
+|------|-------------|
+| `spec_flow_create` | Create a new ticket |
+| `spec_flow_update` | Update ticket fields or status |
+| `spec_flow_validate_tickets` | Validate all tickets for completeness |
+| `spec_flow_ticket_loop_done` | Validate a single ticket (planning loop) |
+| `spec_flow_handoff_loop_done` | Validate handoff before closing a ticket |
+
+## Ticket storage
+
+Tickets are stored as Markdown files in:
+
+```text
+{ticketsFolder}/{feature-name}/*.md
+```
+
+Default: `./docs/features` (configurable in `spec-flow.config.json`).
+
+## Flow diagram
 
 ```mermaid
 flowchart TD
   A[Start /spec-flow-init] --> B[Create ticket with spec_flow_create]
   B --> C[Validate current ticket with spec_flow_ticket_loop_done]
   C --> D{Ticket valid?}
-
-  D -->|No| E[Delete failed ticket with spec_flow_delete]
-  E --> F[Recreate corrected ticket with spec_flow_create]
-  F --> C
-
+  D -->|No| E[Fix ticket with spec_flow_update]
+  E --> C
   D -->|Yes| G{More tickets to create?}
   G -->|Yes| B
   G -->|No| H[Run global validation: spec_flow_validate_tickets]
@@ -64,57 +109,33 @@ flowchart TD
   I -->|Yes| K[Planning complete]
 ```
 
-## Ticket storage
+---
 
-- Config file: `spec-flow.config.json`
-- Config key: `ticketsFolder`
-- Default: `./docs/features`
-- Structure:
-  - `{ticketsFolder}/{feature-name}/*.md`
+## For developers
 
-## Internal resources
-
-### Runtime (published)
-- `skills/planning-methodology/SKILL.md`
-
-Registered through `resources_discover` in `src/events.ts`.
-
-
-## Publish to npm
-
-### Prerequisites
+### Local development
 
 ```bash
-npm login
+npm install
 ```
 
-### Steps
+Pi loads the extension from `package.json`:
+
+```json
+{
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
+```
+
+### Publish to npm
 
 ```bash
-# 1. Bump version
 npm version patch   # or minor, or major
-
-# 2. Dry run (check what gets included)
-npm pack --dry-run
-
-# 3. Publish
+npm pack --dry-run  # preview included files
 npm publish
-
-# 4. Tag release (if using git)
 git push --follow-tags
 ```
 
-### Files included in package
-
-Only `src/`, `skills/planning-methodology/`, `README.md`, and `LICENSE`.  
-Dev/meta files (`AGENTS.md`, `.agents/`, `spec-flow.config.json`, `spec.md`) stay out of the published tarball.
-
-### Consumer installation
-
-```bash
-pi install pi-spec-flow@latest
-# or
-npm install pi-spec-flow
-```
-
-Pi will auto-discover the extension via `pi.extensions` in `package.json`.
+Files included in the published package: `src/`, `skills/planning-methodology/`, `README.md`, `LICENSE`.

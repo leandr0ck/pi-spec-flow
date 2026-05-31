@@ -9,7 +9,7 @@
  *
  * Default ticketsFolder: ./docs/features (configurable via spec-flow.config.json)
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { resolve, dirname, basename, extname, join } from "node:path";
 
 // ── Constants ───────────────────────────────────────────────
@@ -38,6 +38,13 @@ export interface Ticket {
   open_questions: string | null;
   order_index: number | null;
 
+  handoff_summary: string | null;
+  handoff_files: string | null;
+  handoff_decisions: string | null;
+  handoff_verification: string | null;
+  handoff_risks: string | null;
+  handoff_next_ticket: string | null;
+
   created_at: string;
   updated_at: string;
 }
@@ -58,6 +65,34 @@ export interface CreateTicketInput {
   risks?: string;
   open_questions?: string;
   order_index?: number;
+}
+
+/**
+ * Input for updating a ticket. All fields are optional — only provided fields are updated.
+ */
+export interface UpdateTicketInput {
+  title?: string;
+  description?: string;
+  status?: "pending" | "in_progress" | "done";
+  source_section?: string;
+  spec_file?: string;
+  acceptance_criteria?: string | null;
+  verification?: string | null;
+  dependencies?: string | null;
+  files_touched?: string | null;
+  estimated_scope?: string | null;
+  phase?: string | null;
+  is_checkpoint?: boolean;
+  risks?: string | null;
+  open_questions?: string | null;
+  order_index?: number | null;
+
+  handoff_summary?: string | null;
+  handoff_files?: string | null;
+  handoff_decisions?: string | null;
+  handoff_verification?: string | null;
+  handoff_risks?: string | null;
+  handoff_next_ticket?: string | null;
 }
 
 // ── Internal state ──────────────────────────────────────────
@@ -199,6 +234,7 @@ function ticketToMd(ticket: Ticket): string {
   const fields: Array<[string, unknown]> = [
     ["id", ticket.id],
     ["title", ticket.title],
+    ["description", ticket.description],
     ["status", ticket.status],
     ["source_section", ticket.source_section],
     ["spec_file", ticket.spec_file],
@@ -212,6 +248,12 @@ function ticketToMd(ticket: Ticket): string {
     ["risks", ticket.risks],
     ["open_questions", ticket.open_questions],
     ["order_index", ticket.order_index],
+    ["handoff_summary", ticket.handoff_summary],
+    ["handoff_files", ticket.handoff_files],
+    ["handoff_decisions", ticket.handoff_decisions],
+    ["handoff_verification", ticket.handoff_verification],
+    ["handoff_risks", ticket.handoff_risks],
+    ["handoff_next_ticket", ticket.handoff_next_ticket],
     ["created_at", ticket.created_at],
     ["updated_at", ticket.updated_at],
   ];
@@ -267,6 +309,24 @@ function ticketToMd(ticket: Ticket): string {
     lines.push("");
     lines.push("## Open Questions");
     lines.push(ticket.open_questions);
+  }
+
+  if (
+    ticket.handoff_summary ||
+    ticket.handoff_files ||
+    ticket.handoff_decisions ||
+    ticket.handoff_verification ||
+    ticket.handoff_risks ||
+    ticket.handoff_next_ticket
+  ) {
+    lines.push("");
+    lines.push("## Handoff");
+    if (ticket.handoff_summary) lines.push(`- Summary: ${ticket.handoff_summary}`);
+    if (ticket.handoff_files) lines.push(`- Files: ${ticket.handoff_files}`);
+    if (ticket.handoff_decisions) lines.push(`- Decisions: ${ticket.handoff_decisions}`);
+    if (ticket.handoff_verification) lines.push(`- Verification: ${ticket.handoff_verification}`);
+    if (ticket.handoff_risks) lines.push(`- Risks: ${ticket.handoff_risks}`);
+    if (ticket.handoff_next_ticket) lines.push(`- Next: ${ticket.handoff_next_ticket}`);
   }
 
   lines.push(""); // trailing newline
@@ -353,7 +413,7 @@ function parseTicket(filepath: string): Ticket | null {
     return {
       id,
       title: (fm.title as string) || "",
-      description: description || (fm.description as string) || "",
+      description: (fm.description as string) || description || "",
       status: status as "pending" | "in_progress" | "done",
       source_section: (fm.source_section as string) || "",
       spec_file: (fm.spec_file as string) || "",
@@ -367,6 +427,12 @@ function parseTicket(filepath: string): Ticket | null {
       risks: (fm.risks as string) || null,
       open_questions: (fm.open_questions as string) || null,
       order_index: typeof fm.order_index === "number" ? fm.order_index : null,
+      handoff_summary: (fm.handoff_summary as string) || null,
+      handoff_files: (fm.handoff_files as string) || null,
+      handoff_decisions: (fm.handoff_decisions as string) || null,
+      handoff_verification: (fm.handoff_verification as string) || null,
+      handoff_risks: (fm.handoff_risks as string) || null,
+      handoff_next_ticket: (fm.handoff_next_ticket as string) || null,
       created_at: (fm.created_at as string) || new Date().toISOString(),
       updated_at: (fm.updated_at as string) || new Date().toISOString(),
     };
@@ -387,6 +453,7 @@ function collectAllTickets(): Ticket[] {
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
     if (!existsSync(entryPath)) continue;
+    if (!statSync(entryPath).isDirectory()) continue;
     if (!readdirSync(entryPath).some(f => f.endsWith(".md"))) continue;
 
     for (const file of readdirSync(entryPath)) {
@@ -408,6 +475,7 @@ function findTicketFile(id: number): string | null {
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
     if (!existsSync(entryPath)) continue;
+    if (!statSync(entryPath).isDirectory()) continue;
 
     for (const file of readdirSync(entryPath)) {
       if (!file.endsWith(".md")) continue;
@@ -449,7 +517,7 @@ export function insertFullTicket(input: CreateTicketInput): Ticket {
   const allFolders = existsSync(_ticketsFolder)
     ? readdirSync(_ticketsFolder).filter(f => {
         const p = resolve(_ticketsFolder, f);
-        return existsSync(p);
+        return existsSync(p) && statSync(p).isDirectory();
       })
     : [];
 
@@ -472,6 +540,12 @@ export function insertFullTicket(input: CreateTicketInput): Ticket {
     risks: input.risks ?? null,
     open_questions: input.open_questions ?? null,
     order_index: input.order_index ?? null,
+    handoff_summary: null,
+    handoff_files: null,
+    handoff_decisions: null,
+    handoff_verification: null,
+    handoff_risks: null,
+    handoff_next_ticket: null,
     created_at: now,
     updated_at: now,
   };
@@ -491,6 +565,19 @@ export function listTickets(status?: string): Ticket[] {
 
   if (status) {
     return all.filter(t => t.status === status);
+  }
+
+  return all;
+}
+
+/**
+ * List tickets scoped to a spec file, optionally filtered by status.
+ */
+export function listTicketsForSpec(specFile: string, status?: string): Ticket[] {
+  const all = collectAllTickets().filter((t) => t.spec_file === specFile);
+
+  if (status) {
+    return all.filter((t) => t.status === status);
   }
 
   return all;
@@ -530,6 +617,51 @@ export function updateTicketStatus(
 }
 
 /**
+ * Update a ticket's fields. Only the fields provided in `fields` are applied.
+ * Handles type conversions (e.g. is_checkpoint boolean → number).
+ * Returns the updated ticket, or undefined if not found.
+ */
+export function updateTicket(
+  id: number,
+  fields: UpdateTicketInput
+): Ticket | undefined {
+  const filepath = findTicketFile(id);
+  if (!filepath) return undefined;
+
+  const ticket = parseTicket(filepath);
+  if (!ticket) return undefined;
+
+  if (fields.title !== undefined) ticket.title = fields.title;
+  if (fields.description !== undefined) ticket.description = fields.description;
+  if (fields.status !== undefined) ticket.status = fields.status;
+  if (fields.source_section !== undefined) ticket.source_section = fields.source_section;
+  if (fields.spec_file !== undefined) ticket.spec_file = fields.spec_file;
+  if (fields.acceptance_criteria !== undefined) ticket.acceptance_criteria = fields.acceptance_criteria;
+  if (fields.verification !== undefined) ticket.verification = fields.verification;
+  if (fields.dependencies !== undefined) ticket.dependencies = fields.dependencies;
+  if (fields.files_touched !== undefined) ticket.files_touched = fields.files_touched;
+  if (fields.estimated_scope !== undefined) ticket.estimated_scope = fields.estimated_scope;
+  if (fields.phase !== undefined) ticket.phase = fields.phase;
+  if (fields.is_checkpoint !== undefined) ticket.is_checkpoint = fields.is_checkpoint ? 1 : 0;
+  if (fields.risks !== undefined) ticket.risks = fields.risks;
+  if (fields.open_questions !== undefined) ticket.open_questions = fields.open_questions;
+  if (fields.order_index !== undefined) ticket.order_index = fields.order_index;
+  if (fields.handoff_summary !== undefined) ticket.handoff_summary = fields.handoff_summary;
+  if (fields.handoff_files !== undefined) ticket.handoff_files = fields.handoff_files;
+  if (fields.handoff_decisions !== undefined) ticket.handoff_decisions = fields.handoff_decisions;
+  if (fields.handoff_verification !== undefined) ticket.handoff_verification = fields.handoff_verification;
+  if (fields.handoff_risks !== undefined) ticket.handoff_risks = fields.handoff_risks;
+  if (fields.handoff_next_ticket !== undefined) ticket.handoff_next_ticket = fields.handoff_next_ticket;
+
+  ticket.updated_at = new Date().toISOString();
+
+  const mdContent = ticketToMd(ticket);
+  writeFileSync(filepath, mdContent, "utf-8");
+
+  return ticket;
+}
+
+/**
  * Count all tickets.
  */
 export function ticketCount(): number {
@@ -537,28 +669,22 @@ export function ticketCount(): number {
 }
 
 /**
- * Clear all tickets (delete all files in all feature folders).
+ * Count tickets for a specific spec file (feature folder scoped).
  */
-/**
- * Delete a single ticket by ID. Returns true if deleted, false if not found.
- */
-export function deleteTicket(id: number): boolean {
-  const filepath = findTicketFile(id);
-  if (!filepath) return false;
-  try {
-    rmSync(filepath);
-    // Clean up empty feature folder
-    const featureDir = dirname(filepath);
-    if (existsSync(featureDir)) {
-      const remaining = readdirSync(featureDir);
-      if (remaining.length === 0) {
-        rmSync(featureDir, { recursive: true });
-      }
-    }
-    return true;
-  } catch {
-    return false;
+export function ticketCountForSpec(specFile: string): number {
+  if (!_ticketsFolder || !existsSync(_ticketsFolder)) return 0;
+
+  const dir = featurePath(specFile);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return 0;
+
+  let count = 0;
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".md")) continue;
+    const ticket = parseTicket(join(dir, file));
+    if (ticket) count += 1;
   }
+
+  return count;
 }
 
 export function clearTickets(): void {
@@ -567,6 +693,7 @@ export function clearTickets(): void {
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
     if (!existsSync(entryPath)) continue;
+    if (!statSync(entryPath).isDirectory()) continue;
 
     for (const file of readdirSync(entryPath)) {
       if (!file.endsWith(".md")) continue;
@@ -578,5 +705,25 @@ export function clearTickets(): void {
     if (remaining.length === 0) {
       rmSync(entryPath, { recursive: true });
     }
+  }
+}
+
+/**
+ * Clear tickets for a specific spec file (feature folder scoped).
+ */
+export function clearTicketsForSpec(specFile: string): void {
+  if (!_ticketsFolder || !existsSync(_ticketsFolder)) return;
+
+  const dir = featurePath(specFile);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return;
+
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".md")) continue;
+    rmSync(join(dir, file));
+  }
+
+  const remaining = readdirSync(dir);
+  if (remaining.length === 0) {
+    rmSync(dir, { recursive: true });
   }
 }
