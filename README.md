@@ -27,7 +27,7 @@ Pi will auto-discover the extension via `pi.extensions` in `package.json`.
 
 The extension reads the spec and guides the LLM to create structured, validated tickets following a planning methodology. Tickets are created one by one with a validation loop that ensures each one has acceptance criteria, verification steps, estimated scope, and phase.
 
-If tickets already exist for that spec, you'll be prompted to replace them.
+If tickets already exist for that feature key, you'll be prompted to replace them.
 
 ### 2) Implementation
 
@@ -43,7 +43,7 @@ Opens a new isolated session scoped to one ticket. When the ticket is completed,
 1. Start:        spec_flow_update(id: X, status: "in_progress")
 2. Implement:    code within the ticket scope only
 3. Handoff:      spec_flow_update(id: X, handoff_summary: "...", handoff_files: "...", handoff_decisions: "...", handoff_verification: "...", handoff_risks: "None", handoff_next_ticket: "...")
-4. Close:        spec_flow_handoff_loop_done(ticket_id: X, spec_file: "my-spec.md")
+4. Close:        spec_flow_handoff_loop_done(ticket_id: X, feature_key: "checkout")
 ```
 
 If the handoff fields are incomplete, a fix loop starts and you're prompted to complete them before the ticket is marked done.
@@ -53,9 +53,8 @@ If the handoff fields are incomplete, a fix loop starts and you're prompted to c
 When multiple features have pending tickets, `/spec-flow-implement` asks you to choose. You can also pass the feature explicitly:
 
 ```text
-/spec-flow-implement --feature=checkout.md
 /spec-flow-implement --feature=checkout
-/spec-flow-next --new --feature=checkout.md
+/spec-flow-next --new --feature=checkout
 ```
 
 If only one feature has unfinished tickets, it's selected automatically.
@@ -89,7 +88,7 @@ Tickets are stored as Markdown files in:
 {ticketsFolder}/{feature-name}/*.md
 ```
 
-Default: `./docs/features` (configurable in `spec-flow.config.json`).
+Default: `./docs/features` (configurable in `spec-flow.config.json`). Tickets should use `feature_key` for the logical feature name/folder and `source_spec_path` for the real spec document path, for example `docs/implementation-spec.md`.
 
 ## Flow diagram
 

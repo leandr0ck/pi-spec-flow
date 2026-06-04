@@ -77,6 +77,11 @@ export function formatTicketFull(t: Ticket): string {
     lines.push(`**Open Questions:** ${t.open_questions}`);
   }
 
+  if (t.source_spec_path) {
+    lines.push("");
+    lines.push(`**Source Spec:** ${t.source_spec_path}`);
+  }
+
   const hasHandoff = !!(
     t.handoff_summary ||
     t.handoff_files ||
@@ -98,7 +103,7 @@ export function formatTicketFull(t: Ticket): string {
   }
 
   lines.push("");
-  lines.push(`Spec: ${t.spec_file} → ${t.source_section}`);
+  lines.push(`Feature: ${t.feature_key} → ${t.source_section}`);
   lines.push(`Created: ${t.created_at} | Updated: ${t.updated_at}`);
 
   return lines.join("\n");

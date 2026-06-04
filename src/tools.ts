@@ -4,6 +4,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import {
   initTicketsStore,
   ticketsExist,
@@ -16,12 +17,22 @@ import {
   type CreateTicketInput,
   type UpdateTicketInput,
 } from "./tickets-fs.js";
-import { formatTicketCompact } from "./formatters.js";
+import { formatTicketCompact, formatTicketFull } from "./formatters.js";
 import {
   loadLoopState,
   saveLoopState,
   createLoopState,
 } from "./ticket-loop.js";
+import {
+  getBlockForTicket,
+  getNextTicketAfterBlock,
+  getNextTicketInBlock,
+} from "./checkpoints.js";
+import {
+  saveCheckpointHandoff,
+  synthesizeCheckpointHandoff,
+} from "./checkpoint-handoffs.js";
+import { loadPlanningContext } from "./planning-context.js";
 
 type HandoffCheckResult = {
   field: string;
@@ -92,21 +103,85 @@ function buildHandoffChecklist(ticket: Ticket, checks: HandoffCheckResult[]): st
   return lines.join("\n");
 }
 
-function queueNextTicketSession(
+function buildSameSessionTicketMessage(ticket: Ticket): string {
+  return [
+    `Continuá en esta misma sesión con el ticket #${ticket.id}.`,
+    "",
+    formatTicketFull(ticket),
+    "",
+    "Flujo obligatorio:",
+    `1) Marcá inicio: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
+    "2) Implementá únicamente el alcance del ticket actual.",
+    `3) Completá handoff vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
+    `4) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
+  ].join("\n");
+}
+
+function getTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
+  const textPart = result.content?.find(
+    (part): part is { type: "text"; text: string } =>
+      part.type === "text" && typeof part.text === "string",
+  );
+  return textPart?.text ?? "";
+}
+
+function renderCompactResult(
+  result: { content?: Array<{ type: string; text?: string }>; details?: Record<string, unknown> },
+  expanded: boolean,
+  theme: { fg: (token: string, text: string) => string },
+): Text {
+  const details = (result.details ?? {}) as {
+    summary?: string;
+    checklist?: string;
+    ticket_preview?: string;
+  };
+
+  if (!expanded) {
+    const summary = details.summary ?? getTextContent(result);
+    return new Text(summary ? theme.fg("toolOutput", summary) : "", 0, 0);
+  }
+
+  const expandedText = details.checklist ?? details.ticket_preview ?? getTextContent(result);
+  return new Text(expandedText ? `\n${theme.fg("toolOutput", expandedText)}` : "", 0, 0);
+}
+
+function queueImplementationContinuation(
   pi: ExtensionAPI,
+  cwd: string,
   ticket: Ticket,
 ): string {
-  const inProgress = listTicketsForSpec(ticket.spec_file, "in_progress").filter(
-    (t) => t.id !== ticket.id
-  );
-  const pending = listTicketsForSpec(ticket.spec_file, "pending");
-  const next = inProgress[0] || pending[0];
+  const orderedTickets = listTicketsForSpec(ticket.feature_key);
+  const nextInBlock = getNextTicketInBlock(orderedTickets, ticket.id);
 
-  if (next) {
-    pi.sendUserMessage(`/spec-flow-next --new ${next.id}`, {
+  if (nextInBlock) {
+    pi.sendUserMessage(buildSameSessionTicketMessage(nextInBlock), {
       deliverAs: "followUp",
     });
-    return `\nAuto-chain enabled: queuing /spec-flow-next --new ${next.id} to continue.`;
+    return `\nAuto-chain enabled: queued ticket #${nextInBlock.id} in the current session.`;
+  }
+
+  const block = getBlockForTicket(orderedTickets, ticket.id);
+  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
+
+  if (ticket.is_checkpoint && block) {
+    const handoff = synthesizeCheckpointHandoff(block.tickets);
+    saveCheckpointHandoff(cwd, handoff);
+
+    if (nextAfterBlock) {
+      pi.sendUserMessage(`/spec-flow-next --new ${nextAfterBlock.id}`, {
+        deliverAs: "followUp",
+      });
+      return `\nCheckpoint reached: saved synthesized handoff for #${ticket.id} and queued /spec-flow-next --new ${nextAfterBlock.id}.`;
+    }
+
+    return `\nCheckpoint reached: saved synthesized handoff for #${ticket.id}. No remaining tickets in this feature.`;
+  }
+
+  if (nextAfterBlock) {
+    pi.sendUserMessage(`/spec-flow-next --new ${nextAfterBlock.id}`, {
+      deliverAs: "followUp",
+    });
+    return `\nBlock ended without explicit checkpoint. Queued /spec-flow-next --new ${nextAfterBlock.id}.`;
   }
 
   return "\nAuto-chain: no remaining pending/in-progress tickets in this feature.";
@@ -123,12 +198,14 @@ export function registerTools(pi: ExtensionAPI): void {
     description:
       "Create a new spec ticket with full planning-and-task-breakdown fields. Use after analyzing the spec to create properly structured tasks.",
     promptSnippet:
-      "spec_flow_create(title, description, source_section, spec_file, acceptance_criteria?, verification?, dependencies?, files_touched?, estimated_scope?, phase?, is_checkpoint?, risks?, open_questions?, order_index?)",
+      "spec_flow_create(title, description, source_section, feature_key, source_spec_path?, acceptance_criteria?, verification?, dependencies?, files_touched?, estimated_scope?, phase?, is_checkpoint?, risks?, open_questions?, order_index?)",
     promptGuidelines: [
       "Use spec_flow_create to create tickets after /spec-flow-init loads a spec.",
+      "Set source_spec_path to the real spec document path; when /spec-flow-init was used, spec_flow_create can infer it from planning context.",
+      "Every ticket should retain the real source spec path via source_spec_path.",
       "Every ticket must have acceptance_criteria and verification steps.",
       "estimated_scope must be one of: XS, S, M, L. XL tasks must be broken down further.",
-      "Set is_checkpoint: true for checkpoint tickets between phases (every 2-3 tasks).",
+      "Set is_checkpoint: true for checkpoint tickets every 2-3 tasks and at phase boundaries.",
       "Use phase to group tasks: 'Foundation', 'Core Features', 'Polish'.",
       "dependencies should reference other ticket IDs or be 'None'.",
     ],
@@ -144,9 +221,14 @@ export function registerTools(pi: ExtensionAPI): void {
         description:
           "The spec section reference, e.g. '## User Authentication'",
       }),
-      spec_file: Type.String({
-        description: "The spec file name, e.g. 'spec.md'",
+      feature_key: Type.String({
+        description: "Feature key/folder for the ticket set, e.g. 'checkout' or 'new-arch'",
       }),
+      source_spec_path: Type.Optional(
+        Type.String({
+          description: "Real spec document path, e.g. 'docs/implementation-spec.md'",
+        })
+      ),
 
       acceptance_criteria: Type.Optional(
         Type.String({
@@ -227,7 +309,11 @@ export function registerTools(pi: ExtensionAPI): void {
         title: params.title,
         description: params.description,
         source_section: params.source_section,
-        spec_file: params.spec_file,
+        feature_key: params.feature_key,
+        source_spec_path:
+          params.source_spec_path ??
+          loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath ??
+          undefined,
         acceptance_criteria: params.acceptance_criteria,
         verification: params.verification,
         dependencies: params.dependencies,
@@ -244,8 +330,22 @@ export function registerTools(pi: ExtensionAPI): void {
       const summary = formatTicketCompact(ticket);
       return {
         content: [{ type: "text", text: `Created ${summary}` }],
-        details: { ticket },
+        details: {
+          ticket,
+          summary: `✓ Created #${ticket.id} ${ticket.title}`,
+          ticket_preview: formatTicketFull(ticket),
+        },
       };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("spec_flow_create"))} ${theme.fg("accent", args.title ?? "")}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded }, theme) {
+      return renderCompactResult(result, expanded, theme);
     },
   });
 
@@ -257,11 +357,11 @@ export function registerTools(pi: ExtensionAPI): void {
     description:
       "Update a spec ticket's status and/or fields. Use to mark progress, fix validation issues, or edit any ticket field without recreating it.",
     promptSnippet:
-      "spec_flow_update(id: number, status?, auto_next?, title?, description?, acceptance_criteria?, verification?, ...)",
+      "spec_flow_update(id: number, status?, auto_next?, title?, description?, feature_key?, source_spec_path?, acceptance_criteria?, verification?, ...)",
     promptGuidelines: [
       "Use spec_flow_update to mark a ticket as in_progress when starting work, or done when completed.",
       "When closing a ticket, include full handoff fields (summary/files/decisions/verification/risks/next ticket).",
-      "Auto-chain is enabled by default when status='done'. Set auto_next: false to disable.",
+      "Auto-chain is enabled by default when status='done'. Within a block it continues in the same session; after a checkpoint it opens the next block session. Set auto_next: false to disable.",
       "Use spec_flow_update to fix validation issues without deleting and recreating the ticket.",
       "Only pass the fields that need to change — unchanged fields are preserved automatically.",
       "For example: spec_flow_update(id: 1, acceptance_criteria: '- [ ] User can log in with email/password')",
@@ -276,7 +376,7 @@ export function registerTools(pi: ExtensionAPI): void {
       auto_next: Type.Optional(
         Type.Boolean({
           description:
-            "When status='done': true (default) opens next ticket in fresh session; false disables auto-chain",
+            "When status='done': true (default) continues within the current block or opens the next block session; false disables auto-chain",
         })
       ),
       title: Type.Optional(
@@ -288,8 +388,11 @@ export function registerTools(pi: ExtensionAPI): void {
       source_section: Type.Optional(
         Type.String({ description: "Spec section reference, e.g. '## User Authentication'" })
       ),
-      spec_file: Type.Optional(
-        Type.String({ description: "The spec file name, e.g. 'spec.md'" })
+      feature_key: Type.Optional(
+        Type.String({ description: "Feature key/folder, e.g. 'checkout' or 'new-arch'" })
+      ),
+      source_spec_path: Type.Optional(
+        Type.String({ description: "Real spec document path, e.g. 'docs/implementation-spec.md'" })
       ),
       acceptance_criteria: Type.Optional(
         Type.String({
@@ -387,7 +490,8 @@ export function registerTools(pi: ExtensionAPI): void {
       if (params.title !== undefined) fields.title = params.title;
       if (params.description !== undefined) fields.description = params.description;
       if (params.source_section !== undefined) fields.source_section = params.source_section;
-      if (params.spec_file !== undefined) fields.spec_file = params.spec_file;
+      if (params.feature_key !== undefined) fields.feature_key = params.feature_key;
+      if (params.source_spec_path !== undefined) fields.source_spec_path = params.source_spec_path;
       if (params.acceptance_criteria !== undefined) fields.acceptance_criteria = params.acceptance_criteria;
       if (params.verification !== undefined) fields.verification = params.verification;
       if (params.dependencies !== undefined) fields.dependencies = params.dependencies;
@@ -469,7 +573,7 @@ export function registerTools(pi: ExtensionAPI): void {
               "",
               "No se marcó como done porque faltan campos de handoff.",
               "Completá SOLO los campos ❌ con `spec_flow_update`, luego corré:",
-              `\`spec_flow_handoff_loop_done(ticket_id: ${updatedWithoutDone.id}, spec_file: \"${updatedWithoutDone.spec_file}\")\``,
+              `\`spec_flow_handoff_loop_done(ticket_id: ${updatedWithoutDone.id}, feature_key: \"${updatedWithoutDone.feature_key}\")\``,
             ].join("\n"),
             { deliverAs: "followUp" },
           );
@@ -504,7 +608,7 @@ export function registerTools(pi: ExtensionAPI): void {
 
       const shouldAutoChain = params.status === "done" && params.auto_next !== false;
       if (shouldAutoChain) {
-        text += queueNextTicketSession(pi, updated);
+        text += queueImplementationContinuation(pi, ctx.cwd, updated);
       }
 
       return {
@@ -523,10 +627,10 @@ export function registerTools(pi: ExtensionAPI): void {
     description:
       "Validate ONE ticket handoff before closing. If it passes, marks done. If it fails, fix and call again until pass or max iterations.",
     promptSnippet:
-      "spec_flow_handoff_loop_done(ticket_id, spec_file, max_iterations?)",
+      "spec_flow_handoff_loop_done(ticket_id, feature_key, max_iterations?)",
     promptGuidelines: [
       "Call when finishing implementation for a ticket.",
-      "If handoff passes → ticket is marked done (and auto-chains by default).",
+      "If handoff passes → ticket is marked done. Auto-chain continues in the same session until the checkpoint, then opens the next block session by default.",
       "If it fails → fix only missing handoff fields via spec_flow_update, then call this again with same ticket_id.",
       "DO NOT delete/recreate tickets.",
       "Loop auto-stops when ticket passes or max_iterations (default 3) reached.",
@@ -535,8 +639,8 @@ export function registerTools(pi: ExtensionAPI): void {
       ticket_id: Type.Number({
         description: "The ID of the ticket to close",
       }),
-      spec_file: Type.String({
-        description: "The spec file name, used to scope loop state",
+      feature_key: Type.String({
+        description: "Feature key/folder, used to scope loop state",
       }),
       max_iterations: Type.Optional(
         Type.Number({
@@ -545,13 +649,13 @@ export function registerTools(pi: ExtensionAPI): void {
       ),
       auto_next: Type.Optional(
         Type.Boolean({
-          description: "When done: true (default) queues /spec-flow-next; false disables auto-chain",
+          description: "When done: true (default) continues within the current block or opens the next block session; false disables auto-chain",
         })
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const maxIter = params.max_iterations ?? 3;
-      const loopName = `handoff:${params.spec_file}:${params.ticket_id}`;
+      const loopName = `handoff:${params.feature_key}:${params.ticket_id}`;
       let state = loadLoopState(ctx.cwd);
 
       if (ctx.hasPendingMessages()) {
@@ -597,7 +701,7 @@ export function registerTools(pi: ExtensionAPI): void {
 
           let text = checklist + `\n\n✅ Handoff complete. Ticket #${ticket.id} marked as done.`;
           if (params.auto_next !== false) {
-            text += queueNextTicketSession(pi, doneTicket);
+            text += queueImplementationContinuation(pi, ctx.cwd, doneTicket);
           }
 
           return {
@@ -617,7 +721,7 @@ export function registerTools(pi: ExtensionAPI): void {
           "",
           "**To fix:**",
           `1. \`spec_flow_update(id: ${ticket.id}, <handoff_fields>)\` — set ONLY fields marked ❌`,
-          `2. \`spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, spec_file: \"${params.spec_file}\")\``,
+          `2. \`spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${params.feature_key}\")\``,
         ].join("\n");
         pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 
@@ -647,7 +751,7 @@ export function registerTools(pi: ExtensionAPI): void {
 
         let text = checklist + `\n\n✅ Handoff fixed after ${iter} pass(es). Ticket #${ticket.id} marked as done.`;
         if (params.auto_next !== false) {
-          text += queueNextTicketSession(pi, doneTicket);
+          text += queueImplementationContinuation(pi, ctx.cwd, doneTicket);
         }
 
         return {
@@ -683,7 +787,7 @@ export function registerTools(pi: ExtensionAPI): void {
           "",
           "**To fix:**",
           `1. \`spec_flow_update(id: ${ticket.id}, <handoff_fields>)\` — set ONLY fields marked ❌`,
-          `2. \`spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, spec_file: \"${params.spec_file}\")\``,
+          `2. \`spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${params.feature_key}\")\``,
         ].join("\n"),
         { deliverAs: "followUp" },
       );
@@ -703,17 +807,17 @@ export function registerTools(pi: ExtensionAPI): void {
     description:
       "Validate all spec tickets for completeness and correctness. Returns issues grouped by severity.",
     promptSnippet:
-      "spec_flow_validate_tickets(spec_file?)",
+      "spec_flow_validate_tickets(feature_key?)",
     promptGuidelines: [
       "Use after creating or editing tickets to verify they meet quality standards.",
       "Returns a structured report: passed boolean, score, issues per ticket.",
-      "Critical issues (missing acceptance_criteria, verification, scope, phase) block completion.",
+      "Critical issues (missing source_spec_path, acceptance_criteria, verification, scope, phase) block completion.",
       "Warnings (dependency refs, checkpoint spacing, empty fields) don't block.",
     ],
     parameters: Type.Object({
-      spec_file: Type.Optional(
+      feature_key: Type.Optional(
         Type.String({
-          description: "Optional spec file to validate source_section references",
+          description: "Optional feature key/folder to validate",
         }),
       ),
     }),
@@ -735,7 +839,9 @@ export function registerTools(pi: ExtensionAPI): void {
         };
       }
 
-      const tickets = listTickets();
+      const tickets = params.feature_key
+        ? listTicketsForSpec(params.feature_key)
+        : listTickets();
       if (tickets.length === 0) {
         return {
           content: [
@@ -755,7 +861,6 @@ export function registerTools(pi: ExtensionAPI): void {
       const critical: string[] = [];
       const warnings: string[] = [];
       const validIds = new Set(tickets.map((t) => t.id));
-      const phaseCheckpoints: Map<string, number[]> = new Map();
 
       // Phase ordering for checkpoint spacing analysis
       const phaseOrder = ["Foundation", "Core Features", "Polish"];
@@ -769,10 +874,15 @@ export function registerTools(pi: ExtensionAPI): void {
 
       for (const t of tickets) {
         const label = `#${t.id} "${t.title}"`;
+        const sourceSpecPath = asString(t.source_spec_path);
         const acceptanceCriteria = asString(t.acceptance_criteria);
         const verification = asString(t.verification);
         const description = asString(t.description);
         const dependencies = asString(t.dependencies);
+
+        if (sourceSpecPath.trim().length === 0) {
+          critical.push(`${label}: missing source_spec_path (real source spec path)`);
+        }
 
         // Critical: missing acceptance_criteria
         if (acceptanceCriteria.trim().length === 0) {
@@ -818,26 +928,53 @@ export function registerTools(pi: ExtensionAPI): void {
           }
         }
 
-        // Track checkpoints per phase
-        if (t.is_checkpoint && t.phase) {
-          const list = phaseCheckpoints.get(t.phase) || [];
-          list.push(t.id);
-          phaseCheckpoints.set(t.phase, list);
-        }
       }
 
-      // Warning: phases without checkpoints (every 2-3 tickets needs one)
-      for (const phase of phaseOrder) {
-        const phaseTickets = tickets.filter((t) => t.phase === phase);
-        if (phaseTickets.length >= 2) {
-          const cpIds = (phaseCheckpoints.get(phase) || []).sort((a, b) => a - b);
-          const phaseIds = phaseTickets
-            .map((t) => t.id)
-            .sort((a, b) => a - b);
-          // Check if there's a checkpoint at position ~2-3
-          if (cpIds.length === 0) {
+      const specFiles = params.feature_key
+        ? [params.feature_key]
+        : Array.from(new Set(tickets.map((t) => t.feature_key))).sort();
+
+      for (const specFile of specFiles) {
+        const orderedTickets = listTicketsForSpec(specFile);
+
+        for (const phase of phaseOrder) {
+          const phaseTickets = orderedTickets.filter((t) => t.phase === phase);
+          if (phaseTickets.length === 0) continue;
+
+          const workTickets = phaseTickets.filter((t) => !t.is_checkpoint);
+          const checkpointTickets = phaseTickets.filter((t) => t.is_checkpoint);
+
+          if (workTickets.length >= 2 && checkpointTickets.length === 0) {
             warnings.push(
-              `Phase "${phase}" has ${phaseTickets.length} tickets but no checkpoints (recommend every 2-3 tickets)`,
+              `Feature "${specFile}" phase "${phase}" has ${workTickets.length} work tickets but no checkpoints (recommend every 2-3 tasks and at phase boundaries)`,
+            );
+            continue;
+          }
+
+          let workTicketsSinceCheckpoint = 0;
+
+          for (const ticket of phaseTickets) {
+            if (ticket.is_checkpoint) {
+              if (workTicketsSinceCheckpoint === 0) {
+                warnings.push(
+                  `Feature "${specFile}" phase "${phase}" has checkpoint #${ticket.id} without preceding work tickets`,
+                );
+              } else if (workTicketsSinceCheckpoint > 3) {
+                warnings.push(
+                  `Feature "${specFile}" phase "${phase}" delays checkpoint #${ticket.id} until after ${workTicketsSinceCheckpoint} work tickets (recommend every 2-3 tasks)`,
+                );
+              }
+
+              workTicketsSinceCheckpoint = 0;
+              continue;
+            }
+
+            workTicketsSinceCheckpoint += 1;
+          }
+
+          if (checkpointTickets.length > 0 && workTicketsSinceCheckpoint > 0) {
+            warnings.push(
+              `Feature "${specFile}" phase "${phase}" ends with ${workTicketsSinceCheckpoint} trailing work tickets after the last checkpoint. Add a closing checkpoint before moving on.`,
             );
           }
         }
@@ -883,7 +1020,7 @@ export function registerTools(pi: ExtensionAPI): void {
     description:
       "Validate ONE specific ticket. If it passes, create the next ticket. If it fails, fix it and call again. Loop stops when the ticket passes or max_iterations is reached.",
     promptSnippet:
-      "spec_flow_ticket_loop_done(ticket_id, spec_file, max_iterations?)",
+      "spec_flow_ticket_loop_done(ticket_id, feature_key, max_iterations?)",
     promptGuidelines: [
       "Call after creating a single ticket to validate it before moving on.",
       "If the ticket passes → create the next ticket, then call this tool again with the new ticket_id.",
@@ -896,8 +1033,8 @@ export function registerTools(pi: ExtensionAPI): void {
       ticket_id: Type.Number({
         description: "The ID of the ticket to validate",
       }),
-      spec_file: Type.String({
-        description: "The spec file name, used to name the loop state",
+      feature_key: Type.String({
+        description: "Feature key/folder, used to name the loop state",
       }),
       max_iterations: Type.Optional(
         Type.Number({
@@ -908,7 +1045,7 @@ export function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const maxIter = params.max_iterations ?? 3;
       let state = loadLoopState(ctx.cwd);
-      const loopName = params.spec_file;
+      const loopName = params.feature_key;
 
       if (ctx.hasPendingMessages()) {
         return {
@@ -939,6 +1076,12 @@ export function registerTools(pi: ExtensionAPI): void {
       // Validate this specific ticket — point by point
       type CheckResult = { field: string; ok: boolean; value: string; help: string };
       const checks: CheckResult[] = [
+        {
+          field: "source_spec_path",
+          ok: !!(ticket.source_spec_path && ticket.source_spec_path.trim().length > 0),
+          value: ticket.source_spec_path?.trim().slice(0, 80) || "—",
+          help: "Path to the real source spec document, e.g. 'docs/implementation-spec.md'",
+        },
         {
           field: "acceptance_criteria",
           ok: !!(ticket.acceptance_criteria && ticket.acceptance_criteria.trim().length > 0),
@@ -985,12 +1128,18 @@ export function registerTools(pi: ExtensionAPI): void {
       // ── No active loop → first validation of this ticket ──
       if (!state || state.status !== "active") {
         if (passed) {
+          const summary = `✓ Ticket #${params.ticket_id} passes. Create the next ticket and continue.`;
           return {
             content: [{
               type: "text",
-              text: buildChecklist() + `\n\n✅ Ticket #${params.ticket_id} passes. Create the next ticket and call spec_flow_ticket_loop_done again.`,
+              text: summary,
             }],
-            details: {},
+            details: {
+              summary,
+              checklist: buildChecklist(),
+              passed: true,
+              ticket_id: params.ticket_id,
+            },
           };
         }
 
@@ -1005,15 +1154,20 @@ export function registerTools(pi: ExtensionAPI): void {
           buildChecklist(),
           "",
           `**To fix:**`,
-          `1. Re-read the spec file (\`${params.spec_file}\`) to recall section details`,
+          "1. Re-read the source spec document to recall section details",
           `2. \`spec_flow_update(${params.ticket_id}, <fields>)\` — set ONLY the fields marked ❌ (keep ✅ as-is)`,
-          `3. \`spec_flow_ticket_loop_done(${params.ticket_id}, "${params.spec_file}")\` — same ticket ID, no delete needed`,
+          `3. \`spec_flow_ticket_loop_done(${params.ticket_id}, "${params.feature_key}")\` — same ticket ID, no delete needed`,
         ].join("\n");
         pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 
         return {
           content: [{ type: "text", text: `${checks.filter(c => !c.ok).length} field(s) missing on #${params.ticket_id}. Fix loop started.` }],
-          details: {},
+          details: {
+            summary: `⚠ #${params.ticket_id}: ${checks.filter(c => !c.ok).length} field(s) missing.`,
+            checklist: buildChecklist(),
+            passed: false,
+            ticket_id: params.ticket_id,
+          },
         };
       }
 
@@ -1027,12 +1181,18 @@ export function registerTools(pi: ExtensionAPI): void {
         state.status = "completed";
         state.completedAt = new Date().toISOString();
         saveLoopState(ctx.cwd, state);
+        const summary = `✓ Ticket #${params.ticket_id} fixed after ${iter} pass(es). Create the next ticket and continue.`;
         return {
           content: [{
             type: "text",
-            text: buildChecklist() + `\n\n✅ Ticket #${params.ticket_id} fixed after ${iter} pass(es). Create the next ticket and call spec_flow_ticket_loop_done again.`,
+            text: summary,
           }],
-          details: {},
+          details: {
+            summary,
+            checklist: buildChecklist(),
+            passed: true,
+            ticket_id: params.ticket_id,
+          },
         };
       }
 
@@ -1061,16 +1221,31 @@ export function registerTools(pi: ExtensionAPI): void {
           buildChecklist(),
           "",
           `**To fix:**`,
-          `1. Re-read the spec file (\`${params.spec_file}\`) to recall section details`,
+          "1. Re-read the source spec document to recall section details",
           `2. \`spec_flow_update(${params.ticket_id}, <fields>)\` — set ONLY the fields marked ❌ (keep ✅ as-is)`,
-          `3. \`spec_flow_ticket_loop_done(${params.ticket_id}, "${params.spec_file}")\` — same ticket ID, no delete needed`,
+          `3. \`spec_flow_ticket_loop_done(${params.ticket_id}, "${params.feature_key}")\` — same ticket ID, no delete needed`,
         ].join("\n"),
         { deliverAs: "followUp" },
       );
       return {
         content: [{ type: "text", text: `${checks.filter(c => !c.ok).length} field(s) missing on #${params.ticket_id}. Follow-up sent.` }],
-        details: {},
+        details: {
+          summary: `⚠ #${params.ticket_id}: ${checks.filter(c => !c.ok).length} field(s) still missing.`,
+          checklist: buildChecklist(),
+          passed: false,
+          ticket_id: params.ticket_id,
+        },
       };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("spec_flow_ticket_loop_done"))} ${theme.fg("accent", `#${args.ticket_id ?? ""}`)}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded }, theme) {
+      return renderCompactResult(result, expanded, theme);
     },
   });
 }

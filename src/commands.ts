@@ -2,7 +2,7 @@
  * spec-flow commands — /spec-flow-init, /spec-flow-next, /spec-flow-implement
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolve, basename } from "node:path";
+import { resolve, basename, relative, isAbsolute } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import {
   initTicketsStore,
@@ -17,6 +17,80 @@ import {
 import { formatTicketFull } from "./formatters.js";
 import { parseSpecSections, buildSpecSummary } from "./spec-parser.js";
 import { loadMethodology } from "./methodology-loader.js";
+import { getBlockForTicket, isFirstTicketOfBlock } from "./checkpoints.js";
+import { loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
+import { savePlanningContext } from "./planning-context.js";
+
+type SpecFlowInitArgs = {
+  specArg: string;
+  featureName: string | null;
+};
+
+function normalizeFeatureName(raw: string): string {
+  return (
+    raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "untitled-feature"
+  );
+}
+
+function suggestFeatureNameFromSpec(content: string, specFile: string): string {
+  const h1 = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  if (h1) return normalizeFeatureName(h1);
+
+  const firstNonEmpty = content
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+
+  if (firstNonEmpty) {
+    return normalizeFeatureName(firstNonEmpty.replace(/^#+\s*/, ""));
+  }
+
+  return normalizeFeatureName(specFile.replace(/\.md$/i, ""));
+}
+
+function parseSpecFlowInitArgs(rawArgs?: string): SpecFlowInitArgs | null {
+  if (!rawArgs || !rawArgs.trim()) return null;
+
+  const tokens = rawArgs.trim().split(/\s+/);
+  let specArg: string | null = null;
+  let featureName: string | null = null;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token) continue;
+
+    if (token.startsWith("--feature=")) {
+      featureName = token.slice("--feature=".length).trim() || null;
+      continue;
+    }
+
+    if (token === "--feature" && i + 1 < tokens.length) {
+      featureName = tokens[i + 1].trim() || null;
+      i += 1;
+      continue;
+    }
+
+    if (!token.startsWith("-") && !specArg) {
+      specArg = token;
+    }
+  }
+
+  if (!specArg) return null;
+  return { specArg, featureName };
+}
+
+function toStoredSpecPath(cwd: string, specPath: string): string {
+  const rel = relative(cwd, specPath);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+    return rel;
+  }
+  return specPath;
+}
 
 // ── Command registration ────────────────────────────────────
 
@@ -44,12 +118,13 @@ export function registerCommands(pi: ExtensionAPI): void {
       }
     },
     handler: async (args, ctx) => {
-      if (!args) {
-        ctx.ui.notify("Usage: /spec-flow-init <path-to-spec.md>", "error");
+      const parsedInit = parseSpecFlowInitArgs(args);
+      if (!parsedInit) {
+        ctx.ui.notify("Usage: /spec-flow-init <path-to-spec.md> [--feature \"feature-name\"]", "error");
         return;
       }
 
-      const normalizedArgs = args.trim().replace(/^@+/, "");
+      const normalizedArgs = parsedInit.specArg.trim().replace(/^@+/, "");
       const specPath = resolve(ctx.cwd, normalizedArgs);
       let content: string;
       try {
@@ -60,7 +135,26 @@ export function registerCommands(pi: ExtensionAPI): void {
       }
 
       const specFile = basename(specPath);
+      let featureName = parsedInit.featureName
+        ? normalizeFeatureName(parsedInit.featureName)
+        : suggestFeatureNameFromSpec(content, specFile);
+
+      if (!parsedInit.featureName) {
+        const confirmed = await ctx.ui.confirm(
+          "Confirmar feature",
+          `No se indicó --feature. Sugerencia desde el título de la spec: "${featureName}". ¿Usar este nombre?`
+        );
+
+        if (!confirmed) {
+          ctx.ui.notify(
+            "Init cancelado. Volvé a ejecutar con --feature \"nombre-feature\".",
+            "info"
+          );
+          return;
+        }
+      }
       const { sections } = parseSpecSections(content);
+      const storedSpecPath = toStoredSpecPath(ctx.cwd, specPath);
 
       if (sections.length === 0) {
         ctx.ui.notify(
@@ -72,13 +166,14 @@ export function registerCommands(pi: ExtensionAPI): void {
 
       // Init tickets store
       initTicketsStore(ctx.cwd);
+      savePlanningContext(ctx.cwd, featureName, storedSpecPath);
 
       // Clear existing tickets if user confirms
-      const existingCount = ticketCountForSpec(specFile);
+      const existingCount = ticketCountForSpec(featureName);
       if (existingCount > 0) {
         const replace = await ctx.ui.confirm(
           "Tickets exist",
-          `${existingCount} ticket(s) already exist for "${specFile}". Replace them?`
+          `${existingCount} ticket(s) already exist for feature "${featureName}". Replace them?`
         );
         if (!replace) {
           ctx.ui.notify(
@@ -87,7 +182,7 @@ export function registerCommands(pi: ExtensionAPI): void {
           );
           return;
         }
-        clearTicketsForSpec(specFile);
+        clearTicketsForSpec(featureName);
       }
 
       // Send the spec + planning methodology to the LLM
@@ -102,20 +197,22 @@ export function registerCommands(pi: ExtensionAPI): void {
         "**Your task — create and validate tickets one at a time:**",
         "",
         "1. Create ticket #1 using `spec_flow_create`. Start with Foundation phase.",
-        `2. Validate it: \`spec_flow_ticket_loop_done(ticket_id: <id>, spec_file: "${specFile}")\``,
+        `2. Validate it: \`spec_flow_ticket_loop_done(ticket_id: <id>, feature_key: "${featureName}")\``,
         "3. If it passes → create the next ticket, validate it. Repeat for all tickets.",
-        "4. If it fails → the fix loop starts with a validation checklist. **Re-read the spec file** to recall context, then: `spec_flow_update` to fix only the failing fields, `spec_flow_ticket_loop_done` again with the same ID.",
+        "4. If it fails → the fix loop starts with a validation checklist. **Re-read the source spec document** to recall context, then: `spec_flow_update` to fix only the failing fields, `spec_flow_ticket_loop_done` again with the same ID.",
         "5. After ALL tickets pass individually, run \`spec_flow_validate_tickets\` for cross-cutting checks.",
         "",
-        "Create Foundation phase tickets first, then Core Features, then Polish. Add checkpoint tickets between phases.",
-        `Use spec_file: "${specFile}" for all tickets.`,
+        "Create Foundation phase tickets first, then Core Features, then Polish. Add checkpoint tickets every 2-3 tasks and at phase boundaries.",
+        `Use feature_key: "${featureName}" for all tickets (this is the feature key/folder).`,
+        `Use source_spec_path: "${storedSpecPath}" for all tickets (this is the real spec file path).`,
+        `Spec source file loaded: "${specFile}".`,
         "",
-        "Every ticket MUST have: acceptance_criteria, verification, estimated_scope (XS/S/M/L), and phase.",
+        "Every ticket MUST have: acceptance_criteria, verification, estimated_scope (XS/S/M/L), phase, and source_spec_path.",
       ].join("\n");
 
       pi.sendUserMessage(msg);
       ctx.ui.notify(
-        `Loaded spec "${specFile}" (${sections.length} sections). LLM will now create structured tickets.`,
+        `Loaded spec "${specFile}" for feature "${featureName}" (${sections.length} sections). LLM will now create structured tickets.`,
         "success"
       );
     },
@@ -139,7 +236,7 @@ export function registerCommands(pi: ExtensionAPI): void {
       const parsed = parseSpecFlowNextArgs(args);
       let ticket: Ticket | undefined;
       const all = listTickets();
-      const availableSpecs = Array.from(new Set(all.map((t) => t.spec_file))).sort();
+      const availableSpecs = Array.from(new Set(all.map((t) => t.feature_key))).sort();
       const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
 
       if (parsed.feature && !resolvedFeature) {
@@ -156,9 +253,9 @@ export function registerCommands(pi: ExtensionAPI): void {
           ctx.ui.notify(`Ticket #${parsed.ticketId} not found.`, "error");
           return;
         }
-        if (resolvedFeature && byId.spec_file !== resolvedFeature) {
+        if (resolvedFeature && byId.feature_key !== resolvedFeature) {
           ctx.ui.notify(
-            `Ticket #${byId.id} belongs to "${byId.spec_file}", not "${resolvedFeature}".`,
+            `Ticket #${byId.id} belongs to "${byId.feature_key}", not "${resolvedFeature}".`,
             "error"
           );
           return;
@@ -190,13 +287,28 @@ export function registerCommands(pi: ExtensionAPI): void {
         return;
       }
 
+      const orderedTickets = listTicketsForSpec(ticket.feature_key);
+      const previousHandoff = isFirstTicketOfBlock(orderedTickets, ticket.id)
+        ? loadPreviousCheckpointHandoff(ctx.cwd, orderedTickets, ticket.id)?.content ?? null
+        : null;
+
       if (!parsed.openInNewSession) {
-        pi.sendUserMessage(formatTicketFull(ticket));
+        pi.sendUserMessage(
+          previousHandoff
+            ? [
+                "Leé primero este handoff sintetizado del checkpoint anterior:",
+                "",
+                previousHandoff,
+                "",
+                formatTicketFull(ticket),
+              ].join("\n")
+            : formatTicketFull(ticket)
+        );
         ctx.ui.notify(`Sent ticket #${ticket.id}: ${ticket.title}`, "success");
         return;
       }
 
-      const kickoff = buildTicketKickoffMessage(ticket);
+      const kickoff = buildBlockKickoffMessage(ticket, orderedTickets, previousHandoff);
       await ctx.newSession({
         parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
         withSession: async (newSessionCtx) => {
@@ -214,7 +326,7 @@ export function registerCommands(pi: ExtensionAPI): void {
 
   pi.registerCommand("spec-flow-implement", {
     description:
-      "Start implementation ticket-by-ticket (select feature if multiple, or pass --feature)",
+      "Start implementation block-by-block until each checkpoint (select feature if multiple, or pass --feature)",
     handler: async (args, ctx) => {
       await startImplementationByTicket(args, ctx);
     },
@@ -313,35 +425,63 @@ function buildTicketKickoffMessage(ticket: Ticket): string {
     `1) Marcá inicio: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
     "2) Implementá únicamente el alcance del ticket.",
     `3) Completá handoff: spec_flow_update(id: ${ticket.id}, handoff_summary: \"...\", handoff_files: \"...\", handoff_decisions: \"...\", handoff_verification: \"...\", handoff_risks: \"None\", handoff_next_ticket: \"...\")`,
-    `4) Cerrá con validación: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, spec_file: \"${ticket.spec_file}\")  // marca done + auto-chain`,
-    `5) Si seguís manualmente: /spec-flow-next --new --feature=${ticket.spec_file}`,
+    `4) Cerrá con validación: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")  // marca done + auto-chain`,
+    `5) Si seguís manualmente: /spec-flow-next --new --feature=${ticket.feature_key}`,
   ].join("\n");
 }
 
-function buildImplementationKickoffMessage(
+function buildBlockKickoffMessage(
   ticket: Ticket,
-  done: number,
-  inProgress: number,
-  pending: number,
-  total: number
+  orderedTickets: Ticket[],
+  previousCheckpointHandoff: string | null,
+  progress?: {
+    done: number;
+    inProgress: number;
+    pending: number;
+    total: number;
+  },
 ): string {
+  const block = getBlockForTicket(orderedTickets, ticket.id);
+  if (!block) {
+    return buildTicketKickoffMessage(ticket);
+  }
+
+  const ticketList = block.tickets.map((entry) => `#${entry.id}`).join(", ");
+  const checkpointLabel = block.checkpointTicket
+    ? `#${block.checkpointTicket.id}`
+    : "implicit final checkpoint";
+
   return [
-    "Inicio de implementación por tickets (contexto aislado por sesión).",
-    `Estado actual: ${done}/${total} done, ${inProgress} in_progress, ${pending} pending.`,
+    "Inicio de implementación por bloque hasta checkpoint.",
+    progress
+      ? `Estado actual: ${progress.done}/${progress.total} done, ${progress.inProgress} in_progress, ${progress.pending} pending.`
+      : null,
+    `Bloque activo: ${ticketList}.`,
+    `Este bloque termina al cerrar el checkpoint ${checkpointLabel}.`,
+    previousCheckpointHandoff
+      ? [
+          "",
+          "Leé este handoff sintetizado del checkpoint anterior antes de empezar:",
+          "",
+          previousCheckpointHandoff,
+        ].join("\n")
+      : null,
     "",
-    `Trabajá SOLO el ticket #${ticket.id}.`,
+    `Trabajá ahora el ticket #${ticket.id}.`,
     "",
     formatTicketFull(ticket),
     "",
     "Flujo obligatorio:",
     `1) Al arrancar: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
-    "2) Implementá solo este alcance.",
+    "2) Implementá solo el alcance del ticket actual.",
     `3) Completá handoff vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
-    `4) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, spec_file: \"${ticket.spec_file}\")`,
-    "5) Auto-chain: se abrirá automáticamente la siguiente sesión/ticket.",
+    `4) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
+    `5) Si este ticket no es checkpoint, el siguiente ticket del bloque llegará en esta misma sesión. Si este ticket es checkpoint, se sintetiza handoff y se abre una nueva sesión para el próximo bloque.`,
     "",
-    "No arrastres contexto de tickets ya cerrados salvo dependencia explícita.",
-  ].join("\n");
+    "No arrastres contexto de otros bloques salvo dependencias explícitas o el handoff del checkpoint previo.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 type StartImplementationContext = {
@@ -357,6 +497,7 @@ type StartImplementationContext = {
     parentSession?: string;
     withSession: (ctx: {
       sendUserMessage: (content: string) => Promise<void>;
+      ui: { notify: (message: string, level: "info" | "success" | "warning" | "error") => void };
     }) => Promise<void>;
   }) => Promise<{ cancelled?: boolean }>;
 };
@@ -366,7 +507,7 @@ async function confirmSelectedImplementationTicket(
   ctx: StartImplementationContext
 ): Promise<boolean> {
   ctx.ui.notify(
-    `Ticket seleccionado: #${ticket.id} — ${ticket.title} (${ticket.spec_file})`,
+    `Ticket seleccionado: #${ticket.id} — ${ticket.title} (${ticket.feature_key})`,
     "info"
   );
 
@@ -418,7 +559,7 @@ async function startImplementationByTicket(
 
   const parsed = parseSpecFlowNextArgs(args);
   let ticket: Ticket | undefined;
-  const availableSpecs = Array.from(new Set(all.map((t) => t.spec_file))).sort();
+  const availableSpecs = Array.from(new Set(all.map((t) => t.feature_key))).sort();
 
   const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
 
@@ -437,16 +578,16 @@ async function startImplementationByTicket(
       return;
     }
 
-    if (resolvedFeature && ticket.spec_file !== resolvedFeature) {
+    if (resolvedFeature && ticket.feature_key !== resolvedFeature) {
       ctx.ui.notify(
-        `Ticket #${ticket.id} belongs to "${ticket.spec_file}", not "${resolvedFeature}".`,
+        `Ticket #${ticket.id} belongs to "${ticket.feature_key}", not "${resolvedFeature}".`,
         "error"
       );
       return;
     }
   } else {
     const unfinishedSpecs = Array.from(
-      new Set(all.filter((t) => t.status !== "done").map((t) => t.spec_file))
+      new Set(all.filter((t) => t.status !== "done").map((t) => t.feature_key))
     ).sort();
 
     if (unfinishedSpecs.length === 0) {
@@ -488,18 +629,21 @@ async function startImplementationByTicket(
     return;
   }
 
-  const scoped = listTicketsForSpec(ticket.spec_file);
+  const scoped = listTicketsForSpec(ticket.feature_key);
   const done = scoped.filter((t) => t.status === "done").length;
   const inProgressCount = scoped.filter((t) => t.status === "in_progress").length;
   const pendingCount = scoped.filter((t) => t.status === "pending").length;
 
-  const kickoff = buildImplementationKickoffMessage(
-    ticket,
+  const previousHandoff = isFirstTicketOfBlock(scoped, ticket.id)
+    ? loadPreviousCheckpointHandoff(ctx.cwd, scoped, ticket.id)?.content ?? null
+    : null;
+
+  const kickoff = buildBlockKickoffMessage(ticket, scoped, previousHandoff, {
     done,
-    inProgressCount,
-    pendingCount,
-    scoped.length
-  );
+    inProgress: inProgressCount,
+    pending: pendingCount,
+    total: scoped.length,
+  });
 
   await ctx.newSession({
     parentSession: ctx.sessionManager.getSessionFile() ?? undefined,

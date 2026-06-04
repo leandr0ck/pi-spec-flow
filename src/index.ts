@@ -9,12 +9,12 @@
  *   - Vertical slicing: each ticket is a complete feature path
  *   - Dependency graph analysis
  *   - Acceptance criteria, verification steps, scope estimation
- *   - Phased with checkpoints between phases
+ *   - Phased with checkpoints every 2-3 tasks and at phase boundaries
  *
  * Commands:
  *   /spec-flow-init <path>  — Read a spec and guide the LLM to create structured tickets
  *   /spec-flow-next         — Show next pending ticket (supports --new and --feature)
- *   /spec-flow-implement    — Start implementation flow ticket-by-ticket in isolated sessions
+ *   /spec-flow-implement    — Start implementation flow block-by-block until each checkpoint
  *   /spec-flow-start         — Alias of /spec-flow-implement
  *
  * Tools (for LLM):

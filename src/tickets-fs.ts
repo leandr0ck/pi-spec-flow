@@ -16,6 +16,7 @@ import { resolve, dirname, basename, extname, join } from "node:path";
 
 const CONFIG_FILE = "spec-flow.config.json";
 const DEFAULT_TICKETS_FOLDER = "./docs/features";
+const PHASE_ORDER = ["Foundation", "Core Features", "Polish"] as const;
 
 // ── Types (mirrors db.ts for drop-in replacement) ───────────
 
@@ -25,7 +26,8 @@ export interface Ticket {
   description: string;
   status: "pending" | "in_progress" | "done";
   source_section: string;
-  spec_file: string;
+  feature_key: string;
+  source_spec_path: string | null;
 
   acceptance_criteria: string | null;
   verification: string | null;
@@ -33,7 +35,7 @@ export interface Ticket {
   files_touched: string | null;
   estimated_scope: string | null;
   phase: string | null;
-  is_checkpoint: number;
+  is_checkpoint: boolean;
   risks: string | null;
   open_questions: string | null;
   order_index: number | null;
@@ -53,7 +55,8 @@ export interface CreateTicketInput {
   title: string;
   description: string;
   source_section: string;
-  spec_file: string;
+  feature_key: string;
+  source_spec_path?: string;
 
   acceptance_criteria?: string;
   verification?: string;
@@ -75,7 +78,8 @@ export interface UpdateTicketInput {
   description?: string;
   status?: "pending" | "in_progress" | "done";
   source_section?: string;
-  spec_file?: string;
+  feature_key?: string;
+  source_spec_path?: string | null;
   acceptance_criteria?: string | null;
   verification?: string | null;
   dependencies?: string | null;
@@ -121,6 +125,39 @@ function ensureDir(dir: string): void {
   }
 }
 
+function phaseRank(phase: string | null): number {
+  const idx = PHASE_ORDER.indexOf(phase as (typeof PHASE_ORDER)[number]);
+  return idx === -1 ? PHASE_ORDER.length : idx;
+}
+
+function compareTicketsWithinSpec(a: Ticket, b: Ticket): number {
+  const phaseDiff = phaseRank(a.phase) - phaseRank(b.phase);
+  if (phaseDiff !== 0) return phaseDiff;
+
+  const aHasOrder = typeof a.order_index === "number";
+  const bHasOrder = typeof b.order_index === "number";
+  const aOrder = a.order_index ?? Number.MAX_SAFE_INTEGER;
+  const bOrder = b.order_index ?? Number.MAX_SAFE_INTEGER;
+
+  if (aHasOrder && bHasOrder && aOrder !== bOrder) {
+    return aOrder - bOrder;
+  }
+
+  if (aHasOrder !== bHasOrder) {
+    return aHasOrder ? -1 : 1;
+  }
+
+  return a.id - b.id;
+}
+
+function sortTicketsWithinSpec(tickets: Ticket[]): Ticket[] {
+  return [...tickets].sort(compareTicketsWithinSpec);
+}
+
+function parseCheckpointValue(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
 // ── Public API ──────────────────────────────────────────────
 
 /**
@@ -150,21 +187,26 @@ export function getTicketsFolder(): string {
 // ── Helpers ─────────────────────────────────────────────────
 
 /**
- * Derive the feature folder name from a spec file path (basename without extension).
- * e.g. "spec.md" → "spec",  "frontend/spec.md" → "spec"
+ * Derive a safe feature folder name from the provided feature key.
  */
-function featureFolderFromSpec(specFile: string): string {
-  const base = basename(specFile);
+function featureFolderFromSpec(featureKey: string): string {
+  const base = basename(featureKey);
   const ext = extname(base);
-  return ext ? base.slice(0, -ext.length) : base;
+  const raw = (ext ? base.slice(0, -ext.length) : base).trim().toLowerCase();
+  return (
+    raw
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "untitled-feature"
+  );
 }
 
 /**
  * Build the full path to a feature folder.
  */
-function featurePath(specFile: string): string {
+function featurePath(featureKey: string): string {
   if (!_ticketsFolder) throw new Error("Tickets store not initialised. Call initTicketsStore(cwd) first.");
-  return resolve(_ticketsFolder, featureFolderFromSpec(specFile));
+  return resolve(_ticketsFolder, featureFolderFromSpec(featureKey));
 }
 
 /**
@@ -237,7 +279,8 @@ function ticketToMd(ticket: Ticket): string {
     ["description", ticket.description],
     ["status", ticket.status],
     ["source_section", ticket.source_section],
-    ["spec_file", ticket.spec_file],
+    ["feature_key", ticket.feature_key],
+    ["source_spec_path", ticket.source_spec_path],
     ["acceptance_criteria", ticket.acceptance_criteria],
     ["verification", ticket.verification],
     ["dependencies", ticket.dependencies],
@@ -309,6 +352,12 @@ function ticketToMd(ticket: Ticket): string {
     lines.push("");
     lines.push("## Open Questions");
     lines.push(ticket.open_questions);
+  }
+
+  if (ticket.source_spec_path) {
+    lines.push("");
+    lines.push("## Source Spec");
+    lines.push(ticket.source_spec_path);
   }
 
   if (
@@ -416,14 +465,15 @@ function parseTicket(filepath: string): Ticket | null {
       description: (fm.description as string) || description || "",
       status: status as "pending" | "in_progress" | "done",
       source_section: (fm.source_section as string) || "",
-      spec_file: (fm.spec_file as string) || "",
+      feature_key: (fm.feature_key as string) || "",
+      source_spec_path: (fm.source_spec_path as string) || null,
       acceptance_criteria: (fm.acceptance_criteria as string) || null,
       verification: (fm.verification as string) || null,
       dependencies: (fm.dependencies as string) || null,
       files_touched: (fm.files_touched as string) || null,
       estimated_scope: (fm.estimated_scope as string) || null,
       phase: (fm.phase as string) || null,
-      is_checkpoint: fm.is_checkpoint === true ? 1 : 0,
+      is_checkpoint: parseCheckpointValue(fm.is_checkpoint),
       risks: (fm.risks as string) || null,
       open_questions: (fm.open_questions as string) || null,
       order_index: typeof fm.order_index === "number" ? fm.order_index : null,
@@ -498,7 +548,7 @@ export function insertTicket(input: {
   title: string;
   description: string;
   source_section: string;
-  spec_file: string;
+  feature_key: string;
 }): Ticket {
   const fullInput: CreateTicketInput = { ...input };
   return insertFullTicket(fullInput);
@@ -510,7 +560,7 @@ export function insertTicket(input: {
 export function insertFullTicket(input: CreateTicketInput): Ticket {
   if (!_ticketsFolder) throw new Error("Tickets store not initialised. Call initTicketsStore(cwd) first.");
 
-  const featureDir = featurePath(input.spec_file);
+  const featureDir = featurePath(input.feature_key);
   ensureDir(featureDir);
 
   // Collect existing feature folders for global ID assignment
@@ -529,14 +579,15 @@ export function insertFullTicket(input: CreateTicketInput): Ticket {
     description: input.description,
     status: "pending",
     source_section: input.source_section,
-    spec_file: input.spec_file,
+    feature_key: input.feature_key,
+    source_spec_path: input.source_spec_path ?? null,
     acceptance_criteria: input.acceptance_criteria ?? null,
     verification: input.verification ?? null,
     dependencies: input.dependencies ?? null,
     files_touched: input.files_touched ?? null,
     estimated_scope: input.estimated_scope ?? null,
     phase: input.phase ?? null,
-    is_checkpoint: input.is_checkpoint ? 1 : 0,
+    is_checkpoint: Boolean(input.is_checkpoint),
     risks: input.risks ?? null,
     open_questions: input.open_questions ?? null,
     order_index: input.order_index ?? null,
@@ -571,10 +622,12 @@ export function listTickets(status?: string): Ticket[] {
 }
 
 /**
- * List tickets scoped to a spec file, optionally filtered by status.
+ * List tickets scoped to a feature key, optionally filtered by status.
  */
-export function listTicketsForSpec(specFile: string, status?: string): Ticket[] {
-  const all = collectAllTickets().filter((t) => t.spec_file === specFile);
+export function listTicketsForSpec(featureKey: string, status?: string): Ticket[] {
+  const all = sortTicketsWithinSpec(
+    collectAllTickets().filter((t) => t.feature_key === featureKey)
+  );
 
   if (status) {
     return all.filter((t) => t.status === status);
@@ -618,7 +671,7 @@ export function updateTicketStatus(
 
 /**
  * Update a ticket's fields. Only the fields provided in `fields` are applied.
- * Handles type conversions (e.g. is_checkpoint boolean → number).
+ * Handles type conversions (e.g. persisted checkpoint values → boolean).
  * Returns the updated ticket, or undefined if not found.
  */
 export function updateTicket(
@@ -635,14 +688,15 @@ export function updateTicket(
   if (fields.description !== undefined) ticket.description = fields.description;
   if (fields.status !== undefined) ticket.status = fields.status;
   if (fields.source_section !== undefined) ticket.source_section = fields.source_section;
-  if (fields.spec_file !== undefined) ticket.spec_file = fields.spec_file;
+  if (fields.feature_key !== undefined) ticket.feature_key = fields.feature_key;
+  if (fields.source_spec_path !== undefined) ticket.source_spec_path = fields.source_spec_path;
   if (fields.acceptance_criteria !== undefined) ticket.acceptance_criteria = fields.acceptance_criteria;
   if (fields.verification !== undefined) ticket.verification = fields.verification;
   if (fields.dependencies !== undefined) ticket.dependencies = fields.dependencies;
   if (fields.files_touched !== undefined) ticket.files_touched = fields.files_touched;
   if (fields.estimated_scope !== undefined) ticket.estimated_scope = fields.estimated_scope;
   if (fields.phase !== undefined) ticket.phase = fields.phase;
-  if (fields.is_checkpoint !== undefined) ticket.is_checkpoint = fields.is_checkpoint ? 1 : 0;
+  if (fields.is_checkpoint !== undefined) ticket.is_checkpoint = fields.is_checkpoint;
   if (fields.risks !== undefined) ticket.risks = fields.risks;
   if (fields.open_questions !== undefined) ticket.open_questions = fields.open_questions;
   if (fields.order_index !== undefined) ticket.order_index = fields.order_index;
@@ -669,12 +723,12 @@ export function ticketCount(): number {
 }
 
 /**
- * Count tickets for a specific spec file (feature folder scoped).
+ * Count tickets for a specific feature key (feature folder scoped).
  */
-export function ticketCountForSpec(specFile: string): number {
+export function ticketCountForSpec(featureKey: string): number {
   if (!_ticketsFolder || !existsSync(_ticketsFolder)) return 0;
 
-  const dir = featurePath(specFile);
+  const dir = featurePath(featureKey);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return 0;
 
   let count = 0;
@@ -709,12 +763,12 @@ export function clearTickets(): void {
 }
 
 /**
- * Clear tickets for a specific spec file (feature folder scoped).
+ * Clear tickets for a specific feature key (feature folder scoped).
  */
-export function clearTicketsForSpec(specFile: string): void {
+export function clearTicketsForSpec(featureKey: string): void {
   if (!_ticketsFolder || !existsSync(_ticketsFolder)) return;
 
-  const dir = featurePath(specFile);
+  const dir = featurePath(featureKey);
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return;
 
   for (const file of readdirSync(dir)) {
