@@ -15,6 +15,16 @@ export type CheckpointHandoff = {
   content: string;
 };
 
+export type CheckpointHandoffSections = {
+  summary: string;
+  keyOutcomes: string[];
+  filesChanged: string[];
+  keyDecisions: string[];
+  verification: string[];
+  openRisks: string[];
+  nextRecommendedTicket: string;
+};
+
 function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -38,48 +48,81 @@ function uniqueNonEmpty(lines: string[]): string[] {
   return output;
 }
 
-function splitStructuredText(value: string | null): string[] {
+function getCheckpointTicketFromBlock(tickets: Ticket[]): Ticket {
+  return tickets.find((ticket) => ticket.is_checkpoint) ?? tickets[tickets.length - 1]!;
+}
+
+function splitBulletLines(value: string | null): string[] {
   if (!value) return [];
 
   return value
-    .split(/\r?\n|,/)
+    .split(/\r?\n/)
     .map((entry) => entry.replace(/^[-*•]\s*/, "").trim())
     .filter(Boolean);
 }
 
-export function synthesizeCheckpointHandoff(tickets: Ticket[]): CheckpointHandoff {
+function splitFileEntries(value: string | null): string[] {
+  if (!value) return [];
+
+  return value
+    .split(/\r?\n/)
+    .flatMap((entry) => entry.split(/\s*,\s*/))
+    .map((entry) => entry.replace(/^[-*•]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function prefixedEntries(ticketId: number, value: string | null): string[] {
+  return splitBulletLines(value).map((entry) => `#${ticketId}: ${entry}`);
+}
+
+export function buildCheckpointHandoffDraft(
+  tickets: Ticket[],
+  nextTicketId: number | null = null,
+): string {
   if (tickets.length === 0) {
-    throw new Error("Cannot synthesize checkpoint handoff for empty ticket set.");
+    throw new Error("Cannot build checkpoint handoff draft for empty ticket set.");
   }
 
-  const checkpointTicket = tickets.find((ticket) => ticket.is_checkpoint) ?? tickets[tickets.length - 1];
+  const checkpointTicket = getCheckpointTicketFromBlock(tickets);
   const featureKey = checkpointTicket.feature_key;
-
   const completedTickets = tickets.map((ticket) => `- #${ticket.id} ${ticket.title}`);
-  const files = uniqueNonEmpty(tickets.flatMap((ticket) => splitStructuredText(ticket.handoff_files)));
+  const outcomes = uniqueNonEmpty(
+    tickets.flatMap((ticket) => prefixedEntries(ticket.id, ticket.handoff_summary)),
+  );
+  const files = uniqueNonEmpty(tickets.flatMap((ticket) => splitFileEntries(ticket.handoff_files)));
   const decisions = uniqueNonEmpty(
-    tickets.flatMap((ticket) =>
-      splitStructuredText(ticket.handoff_decisions).map((entry) => `#${ticket.id}: ${entry}`),
-    ),
+    tickets.flatMap((ticket) => prefixedEntries(ticket.id, ticket.handoff_decisions)),
   );
   const verification = uniqueNonEmpty(
-    tickets.flatMap((ticket) =>
-      splitStructuredText(ticket.handoff_verification).map((entry) => `#${ticket.id}: ${entry}`),
-    ),
+    tickets.flatMap((ticket) => prefixedEntries(ticket.id, ticket.handoff_verification)),
   );
   const risks = uniqueNonEmpty(
     tickets.flatMap((ticket) =>
-      splitStructuredText(ticket.handoff_risks)
-        .filter((entry) => entry.toLowerCase() !== "none")
-        .map((entry) => `#${ticket.id}: ${entry}`),
+      prefixedEntries(ticket.id, ticket.handoff_risks).filter(
+        (entry) => !entry.replace(/^#\d+:\s*/, "").match(/^none$/i),
+      ),
     ),
   );
 
-  const content = [
+  const nextRecommended =
+    nextTicketId != null
+      ? `#${nextTicketId}`
+      : checkpointTicket.handoff_next_ticket?.trim() || "No remaining ticket recorded";
+
+  return [
     `## Checkpoint handoff · ${featureKey} · checkpoint #${checkpointTicket.id}`,
+    "",
+    "### Status",
+    `- Feature: ${featureKey}`,
+    `- Completed block: #${tickets[0]!.id}–#${tickets[tickets.length - 1]!.id}`,
+    `- Checkpoint ticket: #${checkpointTicket.id}`,
+    `- Next recommended ticket: ${nextRecommended}`,
     "",
     "### Completed tickets",
     ...completedTickets,
+    "",
+    "### Key outcomes",
+    ...(outcomes.length > 0 ? outcomes.map((entry) => `- ${entry}`) : ["- None recorded"]),
     "",
     "### Files changed",
     ...(files.length > 0 ? files.map((entry) => `- ${entry}`) : ["- None recorded"]),
@@ -93,6 +136,59 @@ export function synthesizeCheckpointHandoff(tickets: Ticket[]): CheckpointHandof
     "### Open risks",
     ...(risks.length > 0 ? risks.map((entry) => `- ${entry}`) : ["- None"]),
   ].join("\n");
+}
+
+export function renderCheckpointHandoffContent(
+  tickets: Ticket[],
+  sections: CheckpointHandoffSections,
+): string {
+  if (tickets.length === 0) {
+    throw new Error("Cannot render checkpoint handoff for empty ticket set.");
+  }
+
+  const checkpointTicket = getCheckpointTicketFromBlock(tickets);
+  const featureKey = checkpointTicket.feature_key;
+  const completedTickets = tickets.map((ticket) => `- #${ticket.id} ${ticket.title}`);
+
+  return [
+    `## Checkpoint handoff · ${featureKey} · checkpoint #${checkpointTicket.id}`,
+    "",
+    "### Status",
+    `- Feature: ${featureKey}`,
+    `- Completed block: #${tickets[0]!.id}–#${tickets[tickets.length - 1]!.id}`,
+    `- Checkpoint ticket: #${checkpointTicket.id}`,
+    `- Next recommended ticket: ${sections.nextRecommendedTicket}`,
+    "",
+    "### Summary",
+    `- ${sections.summary.trim()}`,
+    "",
+    "### Completed tickets",
+    ...completedTickets,
+    "",
+    "### Key outcomes",
+    ...(sections.keyOutcomes.length > 0 ? sections.keyOutcomes.map((entry) => `- ${entry}`) : ["- None recorded"]),
+    "",
+    "### Files changed",
+    ...(sections.filesChanged.length > 0 ? sections.filesChanged.map((entry) => `- ${entry}`) : ["- None recorded"]),
+    "",
+    "### Key decisions",
+    ...(sections.keyDecisions.length > 0 ? sections.keyDecisions.map((entry) => `- ${entry}`) : ["- None recorded"]),
+    "",
+    "### Verification",
+    ...(sections.verification.length > 0 ? sections.verification.map((entry) => `- ${entry}`) : ["- None recorded"]),
+    "",
+    "### Open risks",
+    ...(sections.openRisks.length > 0 ? sections.openRisks.map((entry) => `- ${entry}`) : ["- None"]),
+  ].join("\n");
+}
+
+export function createCheckpointHandoff(tickets: Ticket[], content: string): CheckpointHandoff {
+  if (tickets.length === 0) {
+    throw new Error("Cannot create checkpoint handoff for empty ticket set.");
+  }
+
+  const checkpointTicket = getCheckpointTicketFromBlock(tickets);
+  const featureKey = checkpointTicket.feature_key;
 
   return {
     featureKey,
@@ -101,7 +197,7 @@ export function synthesizeCheckpointHandoff(tickets: Ticket[]): CheckpointHandof
     blockEndTicketId: tickets[tickets.length - 1]!.id,
     ticketIds: tickets.map((ticket) => ticket.id),
     createdAt: new Date().toISOString(),
-    content,
+    content: content.trim(),
   };
 }
 

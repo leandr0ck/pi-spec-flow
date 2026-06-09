@@ -17,7 +17,7 @@ import {
 import { formatTicketFull } from "./formatters.js";
 import { parseSpecSections, buildSpecSummary } from "./spec-parser.js";
 import { loadMethodology } from "./methodology-loader.js";
-import { getBlockForTicket, isFirstTicketOfBlock } from "./checkpoints.js";
+import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
 import { loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
 import { savePlanningContext } from "./planning-context.js";
 
@@ -291,6 +291,17 @@ export function registerCommands(pi: ExtensionAPI): void {
       const previousHandoff = isFirstTicketOfBlock(orderedTickets, ticket.id)
         ? loadPreviousCheckpointHandoff(ctx.cwd, orderedTickets, ticket.id)?.content ?? null
         : null;
+      const previousCheckpoint = isFirstTicketOfBlock(orderedTickets, ticket.id)
+        ? getPreviousCheckpointTicket(orderedTickets, ticket.id) ?? null
+        : null;
+
+      if (previousCheckpoint && !previousHandoff) {
+        ctx.ui.notify(
+          `Falta el checkpoint handoff de #${previousCheckpoint.id}. Cerrá esa síntesis antes de abrir el siguiente bloque.`,
+          "warning"
+        );
+        return;
+      }
 
       if (!parsed.openInNewSession) {
         pi.sendUserMessage(
@@ -424,9 +435,10 @@ function buildTicketKickoffMessage(ticket: Ticket): string {
     "Plan breve:",
     `1) Marcá inicio: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
     "2) Implementá únicamente el alcance del ticket.",
-    `3) Completá handoff: spec_flow_update(id: ${ticket.id}, handoff_summary: \"...\", handoff_files: \"...\", handoff_decisions: \"...\", handoff_verification: \"...\", handoff_risks: \"None\", handoff_next_ticket: \"...\")`,
-    `4) Cerrá con validación: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")  // marca done + auto-chain`,
-    `5) Si seguís manualmente: /spec-flow-next --new --feature=${ticket.feature_key}`,
+    `3) Completá handoff del ticket: spec_flow_update(id: ${ticket.id}, handoff_summary: \"...\", handoff_files: \"...\", handoff_decisions: \"...\", handoff_verification: \"...\", handoff_risks: \"None\", handoff_next_ticket: \"...\")`,
+    "4) Si este ticket es checkpoint, la extensión te va a pedir una síntesis estructurada del bloque y va a escribir el archivo automáticamente.",
+    `5) Cerrá con validación: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")  // marca done + auto-chain`,
+    `6) Si seguís manualmente: /spec-flow-next --new --feature=${ticket.feature_key}`,
   ].join("\n");
 }
 
@@ -474,9 +486,10 @@ function buildBlockKickoffMessage(
     "Flujo obligatorio:",
     `1) Al arrancar: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
     "2) Implementá solo el alcance del ticket actual.",
-    `3) Completá handoff vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
-    `4) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
-    `5) Si este ticket no es checkpoint, el siguiente ticket del bloque llegará en esta misma sesión. Si este ticket es checkpoint, se sintetiza handoff y se abre una nueva sesión para el próximo bloque.`,
+    `3) Completá handoff del ticket vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
+    "4) Si cerrás un checkpoint, la extensión te va a pedir una síntesis estructurada del bloque y va a escribir el archivo automáticamente.",
+    `5) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
+    `6) Si este ticket no es checkpoint, el siguiente ticket del bloque llegará en esta misma sesión. Si este ticket es checkpoint, se abrirá una nueva sesión para el próximo bloque después de guardar el handoff.`,
     "",
     "No arrastres contexto de otros bloques salvo dependencias explícitas o el handoff del checkpoint previo.",
   ]
@@ -637,6 +650,17 @@ async function startImplementationByTicket(
   const previousHandoff = isFirstTicketOfBlock(scoped, ticket.id)
     ? loadPreviousCheckpointHandoff(ctx.cwd, scoped, ticket.id)?.content ?? null
     : null;
+  const previousCheckpoint = isFirstTicketOfBlock(scoped, ticket.id)
+    ? getPreviousCheckpointTicket(scoped, ticket.id) ?? null
+    : null;
+
+  if (previousCheckpoint && !previousHandoff) {
+    ctx.ui.notify(
+      `Falta el checkpoint handoff de #${previousCheckpoint.id}. Cerrá esa síntesis antes de abrir el siguiente bloque.`,
+      "warning"
+    );
+    return;
+  }
 
   const kickoff = buildBlockKickoffMessage(ticket, scoped, previousHandoff, {
     done,

@@ -29,8 +29,11 @@ import {
   getNextTicketInBlock,
 } from "./checkpoints.js";
 import {
+  buildCheckpointHandoffDraft,
+  type CheckpointHandoffSections,
+  createCheckpointHandoff,
+  renderCheckpointHandoffContent,
   saveCheckpointHandoff,
-  synthesizeCheckpointHandoff,
 } from "./checkpoint-handoffs.js";
 import { loadPlanningContext } from "./planning-context.js";
 
@@ -112,8 +115,9 @@ function buildSameSessionTicketMessage(ticket: Ticket): string {
     "Flujo obligatorio:",
     `1) Marcá inicio: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
     "2) Implementá únicamente el alcance del ticket actual.",
-    `3) Completá handoff vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
-    `4) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
+    `3) Completá handoff del ticket vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
+    "4) Si este ticket es checkpoint, la extensión te va a pedir una síntesis estructurada del bloque y va a escribir el archivo automáticamente.",
+    `5) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
   ].join("\n");
 }
 
@@ -145,6 +149,68 @@ function renderCompactResult(
   return new Text(expandedText ? `\n${theme.fg("toolOutput", expandedText)}` : "", 0, 0);
 }
 
+function normalizeSectionEntries(entries: string[]): string[] {
+  return entries.map((entry) => entry.trim()).filter(Boolean);
+}
+
+function buildCheckpointHandoffRequest(ticket: Ticket): string {
+  const orderedTickets = listTicketsForSpec(ticket.feature_key);
+  const block = getBlockForTicket(orderedTickets, ticket.id);
+  if (!ticket.is_checkpoint || !block) {
+    return `Checkpoint #${ticket.id} reached.`;
+  }
+
+  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
+  const draft = buildCheckpointHandoffDraft(block.tickets, nextAfterBlock?.id ?? null);
+  const nextRecommended = nextAfterBlock ? `#${nextAfterBlock.id}` : "None";
+
+  return [
+    `Checkpoint #${ticket.id} reached. Antes de abrir el próximo bloque, generá el checkpoint handoff llamando \`spec_flow_checkpoint_handoff_save\` como PRÓXIMA acción.`,
+    "",
+    "Reglas:",
+    "- NO redactes un archivo libre.",
+    "- NO pegues markdown final en chat.",
+    "- Usá el tool y completá cada campo estructurado.",
+    "- Basate solo en los handoffs por ticket de este bloque.",
+    "- No inventes archivos, decisiones, verificaciones ni riesgos.",
+    "- Si un campo no tiene evidencia, devolvé array vacío o 'None' según corresponda.",
+    "",
+    "Draft/contexto sintetizado del bloque:",
+    "",
+    draft,
+    "",
+    "Llamá exactamente este tool con estos atributos:",
+    "- checkpoint_ticket_id: número del checkpoint actual",
+    `- feature_key: \"${ticket.feature_key}\"`,
+    "- summary: string corto con el estado del bloque",
+    "- key_outcomes: string[]",
+    "- files_changed: string[]",
+    "- key_decisions: string[]",
+    "- verification: string[]",
+    "- open_risks: string[]",
+    `- next_recommended_ticket: \"${nextRecommended}\"`,
+    "",
+    `Llamá ahora: spec_flow_checkpoint_handoff_save(checkpoint_ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\", ...)`,
+  ].join("\n");
+}
+
+function queueNextBlockAfterCheckpointHandoff(
+  pi: ExtensionAPI,
+  ticket: Ticket,
+): string {
+  const orderedTickets = listTicketsForSpec(ticket.feature_key);
+  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
+
+  if (nextAfterBlock) {
+    pi.sendUserMessage(`/spec-flow-next --new ${nextAfterBlock.id}`, {
+      deliverAs: "followUp",
+    });
+    return `\nCheckpoint handoff saved: queued /spec-flow-next --new ${nextAfterBlock.id}.`;
+  }
+
+  return "\nCheckpoint handoff saved. No remaining tickets in this feature.";
+}
+
 function queueImplementationContinuation(
   pi: ExtensionAPI,
   cwd: string,
@@ -161,21 +227,15 @@ function queueImplementationContinuation(
   }
 
   const block = getBlockForTicket(orderedTickets, ticket.id);
-  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
 
   if (ticket.is_checkpoint && block) {
-    const handoff = synthesizeCheckpointHandoff(block.tickets);
-    saveCheckpointHandoff(cwd, handoff);
-
-    if (nextAfterBlock) {
-      pi.sendUserMessage(`/spec-flow-next --new ${nextAfterBlock.id}`, {
-        deliverAs: "followUp",
-      });
-      return `\nCheckpoint reached: saved synthesized handoff for #${ticket.id} and queued /spec-flow-next --new ${nextAfterBlock.id}.`;
-    }
-
-    return `\nCheckpoint reached: saved synthesized handoff for #${ticket.id}. No remaining tickets in this feature.`;
+    pi.sendUserMessage(buildCheckpointHandoffRequest(ticket), {
+      deliverAs: "followUp",
+    });
+    return "\nCheckpoint reached: queued structured checkpoint handoff synthesis.";
   }
+
+  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
 
   if (nextAfterBlock) {
     pi.sendUserMessage(`/spec-flow-next --new ${nextAfterBlock.id}`, {
@@ -360,7 +420,8 @@ export function registerTools(pi: ExtensionAPI): void {
       "spec_flow_update(id: number, status?, auto_next?, title?, description?, feature_key?, source_spec_path?, acceptance_criteria?, verification?, ...)",
     promptGuidelines: [
       "Use spec_flow_update to mark a ticket as in_progress when starting work, or done when completed.",
-      "When closing a ticket, include full handoff fields (summary/files/decisions/verification/risks/next ticket).",
+      "When closing a ticket, include full per-ticket handoff fields (summary/files/decisions/verification/risks/next ticket).",
+      "If the ticket is a checkpoint, the extension will request a structured block synthesis and write the checkpoint handoff file itself.",
       "Auto-chain is enabled by default when status='done'. Within a block it continues in the same session; after a checkpoint it opens the next block session. Set auto_next: false to disable.",
       "Use spec_flow_update to fix validation issues without deleting and recreating the ticket.",
       "Only pass the fields that need to change — unchanged fields are preserved automatically.",
@@ -588,6 +649,7 @@ export function registerTools(pi: ExtensionAPI): void {
             details: { ticket: updatedWithoutDone, missing_handoff: missing.map((m) => m.field) },
           };
         }
+
       }
 
       const updated = updateTicket(params.id, fields);
@@ -631,6 +693,7 @@ export function registerTools(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Call when finishing implementation for a ticket.",
       "If handoff passes → ticket is marked done. Auto-chain continues in the same session until the checkpoint, then opens the next block session by default.",
+      "If the ticket is a checkpoint, the extension will request a structured block synthesis and write the handoff file before opening the next block.",
       "If it fails → fix only missing handoff fields via spec_flow_update, then call this again with same ticket_id.",
       "DO NOT delete/recreate tickets.",
       "Loop auto-stops when ticket passes or max_iterations (default 3) reached.",
@@ -795,6 +858,134 @@ export function registerTools(pi: ExtensionAPI): void {
       return {
         content: [{ type: "text", text: `${checks.filter((c) => !c.ok).length} handoff field(s) still missing on #${ticket.id}. Follow-up sent.` }],
         details: {},
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "spec_flow_checkpoint_handoff_save",
+    label: "Checkpoint Handoff Save",
+    description:
+      "Save the checkpoint handoff file using a fixed extension template. Use after a checkpoint closes; provide structured section values only.",
+    promptSnippet:
+      "spec_flow_checkpoint_handoff_save(checkpoint_ticket_id, feature_key, summary, key_outcomes, files_changed, key_decisions, verification, open_risks, next_recommended_ticket?)",
+    promptGuidelines: [
+      "Use this only after closing a checkpoint ticket.",
+      "Do NOT write a freeform handoff file in chat; pass structured values and let the extension render the file.",
+      "Use only evidence from the block's per-ticket handoffs.",
+      "Keep entries concise and concrete.",
+      "This should be your immediate next action after a checkpoint closes.",
+    ],
+    parameters: Type.Object({
+      checkpoint_ticket_id: Type.Number({ description: "Checkpoint ticket ID for the block" }),
+      feature_key: Type.String({ description: "Feature key/folder" }),
+      summary: Type.String({ description: "One concise status summary for the completed block" }),
+      key_outcomes: Type.Array(Type.String({ description: "Outcome bullet" }), {
+        description: "Key outcomes achieved in the block",
+      }),
+      files_changed: Type.Array(Type.String({ description: "Changed file or path area" }), {
+        description: "Files or areas changed in the block",
+      }),
+      key_decisions: Type.Array(Type.String({ description: "Decision with rationale" }), {
+        description: "Key technical or product decisions",
+      }),
+      verification: Type.Array(Type.String({ description: "Verification result" }), {
+        description: "Tests, commands, or manual verification with result",
+      }),
+      open_risks: Type.Array(Type.String({ description: "Open risk or TODO" }), {
+        description: "Outstanding risks; use an empty array if none",
+      }),
+      next_recommended_ticket: Type.Optional(
+        Type.String({ description: "Recommended next ticket, e.g. '#7' or 'None'" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      initTicketsStore(ctx.cwd);
+      if (!ticketsExist()) {
+        return {
+          content: [{ type: "text", text: "No tickets store found." }],
+          details: {},
+        };
+      }
+
+      const ticket = getTicket(params.checkpoint_ticket_id);
+      if (!ticket) {
+        return {
+          content: [{ type: "text", text: `Ticket #${params.checkpoint_ticket_id} not found.` }],
+          details: {},
+        };
+      }
+
+      if (ticket.feature_key !== params.feature_key) {
+        return {
+          content: [{ type: "text", text: `Ticket #${ticket.id} belongs to \"${ticket.feature_key}\", not \"${params.feature_key}\".` }],
+          details: {},
+        };
+      }
+
+      if (!ticket.is_checkpoint) {
+        return {
+          content: [{ type: "text", text: `Ticket #${ticket.id} is not a checkpoint.` }],
+          details: {},
+        };
+      }
+
+      if (ticket.status !== "done") {
+        return {
+          content: [{ type: "text", text: `Checkpoint ticket #${ticket.id} must be done before saving its block handoff.` }],
+          details: {},
+        };
+      }
+
+      const orderedTickets = listTicketsForSpec(ticket.feature_key);
+      const block = getBlockForTicket(orderedTickets, ticket.id);
+      if (!block) {
+        return {
+          content: [{ type: "text", text: `Could not resolve block for checkpoint #${ticket.id}.` }],
+          details: {},
+        };
+      }
+
+      if (block.checkpointTicket?.id !== ticket.id) {
+        return {
+          content: [{ type: "text", text: `Ticket #${ticket.id} is not the closing checkpoint for its block.` }],
+          details: {},
+        };
+      }
+
+      const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
+      const sections: CheckpointHandoffSections = {
+        summary: params.summary.trim(),
+        keyOutcomes: normalizeSectionEntries(params.key_outcomes),
+        filesChanged: normalizeSectionEntries(params.files_changed),
+        keyDecisions: normalizeSectionEntries(params.key_decisions),
+        verification: normalizeSectionEntries(params.verification),
+        openRisks: normalizeSectionEntries(params.open_risks).filter((entry) => !/^none$/i.test(entry)),
+        nextRecommendedTicket:
+          params.next_recommended_ticket?.trim() || (nextAfterBlock ? `#${nextAfterBlock.id}` : "None"),
+      };
+
+      if (!sections.summary) {
+        return {
+          content: [{ type: "text", text: "checkpoint handoff save failed: summary is required." }],
+          details: {},
+        };
+      }
+
+      const content = renderCheckpointHandoffContent(block.tickets, sections);
+      saveCheckpointHandoff(ctx.cwd, createCheckpointHandoff(block.tickets, content));
+
+      let text = `Checkpoint handoff saved for #${ticket.id}.`;
+      text += queueNextBlockAfterCheckpointHandoff(pi, ticket);
+
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          summary: `✓ Saved checkpoint handoff for #${ticket.id}`,
+          checkpoint_ticket_id: ticket.id,
+          content,
+        },
+        terminate: true,
       };
     },
   });
