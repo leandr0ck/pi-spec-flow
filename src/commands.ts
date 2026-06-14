@@ -12,14 +12,24 @@ import {
   listTickets,
   listTicketsForSpec,
   getTicket,
+  updateTicket,
+  getCheckpointReviewConfig,
   type Ticket,
+  type ThinkingLevel,
 } from "./tickets-fs.js";
 import { formatTicketFull } from "./formatters.js";
 import { parseSpecSections, buildSpecSummary } from "./spec-parser.js";
 import { loadMethodology } from "./methodology-loader.js";
-import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
-import { loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
+import { getBlockForTicket, getNextTicketAfterBlock, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
+import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
 import { savePlanningContext } from "./planning-context.js";
+import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
+
+type ModelLike = {
+  provider: string;
+  id: string;
+  name?: string;
+};
 
 type SpecFlowInitArgs = {
   specArg: string;
@@ -92,6 +102,83 @@ function toStoredSpecPath(cwd: string, specPath: string): string {
   return specPath;
 }
 
+function parseProviderModel(value: string): { provider: string; modelId: string } | null {
+  const trimmed = value.trim();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  return {
+    provider: trimmed.slice(0, slash),
+    modelId: trimmed.slice(slash + 1),
+  };
+}
+
+function resolveConfiguredModel(
+  modelRegistry: { find: (provider: string, modelId: string) => ModelLike | undefined; getAll: () => ModelLike[] },
+  configuredModel: string,
+): { model?: ModelLike; warning?: string } {
+  const trimmed = configuredModel.trim();
+  if (!trimmed) return { warning: "Empty checkpointReview.model value." };
+
+  const providerModel = parseProviderModel(trimmed);
+  if (providerModel) {
+    const model = modelRegistry.find(providerModel.provider, providerModel.modelId);
+    return model
+      ? { model }
+      : { warning: `Configured review model not found: ${providerModel.provider}/${providerModel.modelId}` };
+  }
+
+  const matches = modelRegistry
+    .getAll()
+    .filter((model) => model.id === trimmed || model.name === trimmed);
+
+  if (matches.length === 1) return { model: matches[0] };
+  if (matches.length > 1) {
+    return {
+      warning: `Configured review model "${trimmed}" is ambiguous. Use provider/model, e.g. ${matches[0].provider}/${matches[0].id}.`,
+    };
+  }
+
+  return { warning: `Configured review model not found: ${trimmed}` };
+}
+
+function filesChangedFromCheckpointHandoff(cwd: string, ticket: Ticket): string[] {
+  const handoff = loadCheckpointHandoff(cwd, ticket.feature_key, ticket.id);
+  if (!handoff) return [];
+
+  const filesSection = handoff.content.match(/### Files changed\n([\s\S]*?)(?=\n### |$)/i);
+  if (!filesSection) return [];
+
+  return filesSection[1]
+    .split("\n")
+    .map((line) => line.replace(/^-\s*/, "").trim())
+    .filter((line) => line.length > 0 && !/^none recorded$/i.test(line));
+}
+
+function buildCheckpointReviewPrompt(cwd: string, ticket: Ticket): string {
+  const reviewConfig = getCheckpointReviewConfig();
+  const orderedTickets = listTicketsForSpec(ticket.feature_key);
+  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
+  const filesChanged = filesChangedFromCheckpointHandoff(cwd, ticket);
+  const skillsList = reviewConfig.skills.map((skill) => `$${skill}`).join(", ");
+  const filesHint = filesChanged.length > 0
+    ? ` Focus on these changed files: ${filesChanged.join(", ")}.`
+    : "";
+  const nextHint = nextAfterBlock
+    ? ` After the review, continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`
+    : " After the review, report final findings. No remaining tickets.";
+
+  return [
+    `**Checkpoint Code Review** — Block ending at #${ticket.id}`,
+    "",
+    `Run the following skills as a code review: ${skillsList}.${filesHint}${nextHint}`,
+  ].join("\n");
+}
+
+function markTicketInProgress(ticket: Ticket): Ticket {
+  if (ticket.status !== "pending") return ticket;
+  return updateTicket(ticket.id, { status: "in_progress" }) ?? ticket;
+}
+
 // ── Command registration ────────────────────────────────────
 
 export function registerCommands(pi: ExtensionAPI): void {
@@ -128,6 +215,7 @@ export function registerCommands(pi: ExtensionAPI): void {
       const specPath = resolve(ctx.cwd, normalizedArgs);
       let content: string;
       try {
+        ctx.ui.notify("Reading spec internally...", "info");
         content = readFileSync(specPath, "utf-8");
       } catch {
         ctx.ui.notify(`Cannot read file: ${specPath}`, "error");
@@ -141,13 +229,13 @@ export function registerCommands(pi: ExtensionAPI): void {
 
       if (!parsedInit.featureName) {
         const confirmed = await ctx.ui.confirm(
-          "Confirmar feature",
-          `No se indicó --feature. Sugerencia desde el título de la spec: "${featureName}". ¿Usar este nombre?`
+          "Confirm feature name",
+          `No --feature flag provided. Suggested from spec title: "${featureName}". Use this name?`
         );
 
         if (!confirmed) {
           ctx.ui.notify(
-            "Init cancelado. Volvé a ejecutar con --feature \"nombre-feature\".",
+            "Init cancelled. Re-run with --feature \"feature-name\".",
             "info"
           );
           return;
@@ -185,7 +273,9 @@ export function registerCommands(pi: ExtensionAPI): void {
         clearTicketsForSpec(featureName);
       }
 
-      // Send the spec + planning methodology to the LLM
+      // Send the spec + planning methodology to the LLM as hidden context.
+      // This keeps the TUI compact while preserving the full planning input.
+      ctx.ui.notify("Loading planning methodology internally...", "info");
       const summary = buildSpecSummary(content, specFile);
       const msg = [
         summary,
@@ -210,10 +300,18 @@ export function registerCommands(pi: ExtensionAPI): void {
         "Every ticket MUST have: acceptance_criteria, verification, estimated_scope (XS/S/M/L), phase, and source_spec_path.",
       ].join("\n");
 
-      pi.sendUserMessage(msg);
+      pi.sendMessage(
+        {
+          customType: "spec-flow-init",
+          content: msg,
+          display: false,
+          details: { specFile, featureName, sections: sections.length },
+        },
+        { triggerTurn: true },
+      );
       ctx.ui.notify(
-        `Loaded spec "${specFile}" for feature "${featureName}" (${sections.length} sections). LLM will now create structured tickets.`,
-        "success"
+        `Loaded spec "${specFile}" for feature "${featureName}" (${sections.length} sections). Creating tickets...`,
+        "info"
       );
     },
   });
@@ -275,7 +373,7 @@ export function registerCommands(pi: ExtensionAPI): void {
               "info"
             );
           } else {
-            ctx.ui.notify("All tickets done!", "success");
+            ctx.ui.notify("All tickets done!", "info");
           }
           return;
         }
@@ -297,36 +395,134 @@ export function registerCommands(pi: ExtensionAPI): void {
 
       if (previousCheckpoint && !previousHandoff) {
         ctx.ui.notify(
-          `Falta el checkpoint handoff de #${previousCheckpoint.id}. Cerrá esa síntesis antes de abrir el siguiente bloque.`,
+          `Checkpoint handoff for #${previousCheckpoint.id} is missing. Complete that summary before opening the next block.`,
           "warning"
         );
         return;
       }
 
+      const activeTicket = markTicketInProgress(ticket);
+      const activeOrderedTickets = listTicketsForSpec(activeTicket.feature_key);
+
       if (!parsed.openInNewSession) {
         pi.sendUserMessage(
           previousHandoff
             ? [
-                "Leé primero este handoff sintetizado del checkpoint anterior:",
+                implementationProtocolLine(),
+                "",
+                "Read this synthesized handoff from the previous checkpoint first:",
                 "",
                 previousHandoff,
                 "",
-                formatTicketFull(ticket),
+                `## Current ticket #${activeTicket.id}`,
+                formatTicketFull(activeTicket),
+                "",
+                compactTicketInstruction(activeTicket),
               ].join("\n")
-            : formatTicketFull(ticket)
+            : buildTicketKickoffMessage(activeTicket)
         );
-        ctx.ui.notify(`Sent ticket #${ticket.id}: ${ticket.title}`, "success");
+        ctx.ui.notify(`Sent ticket #${activeTicket.id}: ${activeTicket.title}`, "info");
         return;
       }
 
-      const kickoff = buildBlockKickoffMessage(ticket, orderedTickets, previousHandoff);
+      const kickoff = buildBlockKickoffMessage(activeTicket, activeOrderedTickets, previousHandoff);
       await ctx.newSession({
         parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
         withSession: async (newSessionCtx) => {
           await newSessionCtx.sendUserMessage(kickoff);
           newSessionCtx.ui.notify(
-            `Opened new session for ticket #${ticket.id}: ${ticket.title}`,
-            "success"
+            `Opened new session for ticket #${activeTicket.id}: ${activeTicket.title}`,
+            "info"
+          );
+        },
+      });
+    },
+  });
+
+  // ── /spec-flow-checkpoint-review ──────────────────────────
+
+  pi.registerCommand("spec-flow-checkpoint-review", {
+    description:
+      "Open a focused checkpoint code review session using checkpointReview config",
+    handler: async (args, ctx) => {
+      initTicketsStore(ctx.cwd);
+      if (!ticketsExist()) {
+        ctx.ui.notify("No tickets store. Run /spec-flow-init first.", "warning");
+        return;
+      }
+
+      const parsed = parseSpecFlowNextArgs(args);
+      if (parsed.ticketId == null) {
+        ctx.ui.notify("Usage: /spec-flow-checkpoint-review <checkpoint-ticket-id> [--feature <feature>]", "error");
+        return;
+      }
+
+      const ticket = getTicket(parsed.ticketId);
+      if (!ticket) {
+        ctx.ui.notify(`Ticket #${parsed.ticketId} not found.`, "error");
+        return;
+      }
+
+      const availableSpecs = Array.from(new Set(listTickets().map((t) => t.feature_key))).sort();
+      const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
+      if (parsed.feature && !resolvedFeature) {
+        ctx.ui.notify(
+          `Feature/spec not found: "${parsed.feature}". Available: ${availableSpecs.join(", ")}`,
+          "error",
+        );
+        return;
+      }
+      if (resolvedFeature && ticket.feature_key !== resolvedFeature) {
+        ctx.ui.notify(
+          `Ticket #${ticket.id} belongs to "${ticket.feature_key}", not "${resolvedFeature}".`,
+          "error",
+        );
+        return;
+      }
+
+      if (!ticket.is_checkpoint || ticket.status !== "done") {
+        ctx.ui.notify(`Ticket #${ticket.id} must be a done checkpoint before code review.`, "error");
+        return;
+      }
+
+      const reviewConfig = getCheckpointReviewConfig();
+      if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
+        ctx.ui.notify("checkpointReview is disabled or has no skills configured.", "warning");
+        return;
+      }
+
+      if (reviewConfig.model) {
+        const resolution = resolveConfiguredModel(ctx.modelRegistry, reviewConfig.model);
+        if (resolution.model) {
+          const success = await pi.setModel(resolution.model as never);
+          if (!success) {
+            ctx.ui.notify(
+              `No API key configured for review model ${resolution.model.provider}/${resolution.model.id}; continuing with current model.`,
+              "warning",
+            );
+          } else {
+            ctx.ui.notify(
+              `Review model selected: ${resolution.model.provider}/${resolution.model.id}`,
+              "info",
+            );
+          }
+        } else if (resolution.warning) {
+          ctx.ui.notify(`${resolution.warning}; continuing with current model.`, "warning");
+        }
+      }
+
+      if (reviewConfig.thinkingLevel) {
+        pi.setThinkingLevel(reviewConfig.thinkingLevel as ThinkingLevel);
+      }
+
+      const reviewPrompt = buildCheckpointReviewPrompt(ctx.cwd, ticket);
+      await ctx.newSession({
+        parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+        withSession: async (newSessionCtx) => {
+          await newSessionCtx.sendUserMessage(reviewPrompt);
+          newSessionCtx.ui.notify(
+            `Opened checkpoint code review for #${ticket.id}.`,
+            "info",
           );
         },
       });
@@ -427,18 +623,12 @@ function resolveFeatureSpec(
 
 function buildTicketKickoffMessage(ticket: Ticket): string {
   return [
-    `Trabajá SOLO el ticket #${ticket.id}.`,
-    "No cargues contexto de otros tickets salvo que sea estrictamente necesario.",
+    implementationProtocolLine(),
     "",
+    `## Current ticket #${ticket.id}`,
     formatTicketFull(ticket),
     "",
-    "Plan breve:",
-    `1) Marcá inicio: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
-    "2) Implementá únicamente el alcance del ticket.",
-    `3) Completá handoff del ticket: spec_flow_update(id: ${ticket.id}, handoff_summary: \"...\", handoff_files: \"...\", handoff_decisions: \"...\", handoff_verification: \"...\", handoff_risks: \"None\", handoff_next_ticket: \"...\")`,
-    "4) Si este ticket es checkpoint, la extensión te va a pedir una síntesis estructurada del bloque y va a escribir el archivo automáticamente.",
-    `5) Cerrá con validación: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")  // marca done + auto-chain`,
-    `6) Si seguís manualmente: /spec-flow-next --new --feature=${ticket.feature_key}`,
+    compactTicketInstruction(ticket),
   ].join("\n");
 }
 
@@ -464,34 +654,16 @@ function buildBlockKickoffMessage(
     : "implicit final checkpoint";
 
   return [
-    "Inicio de implementación por bloque hasta checkpoint.",
-    progress
-      ? `Estado actual: ${progress.done}/${progress.total} done, ${progress.inProgress} in_progress, ${progress.pending} pending.`
-      : null,
-    `Bloque activo: ${ticketList}.`,
-    `Este bloque termina al cerrar el checkpoint ${checkpointLabel}.`,
+    implementationProtocolLine(),
+    `Block ${ticketList} until checkpoint ${checkpointLabel}.`,
     previousCheckpointHandoff
-      ? [
-          "",
-          "Leé este handoff sintetizado del checkpoint anterior antes de empezar:",
-          "",
-          previousCheckpointHandoff,
-        ].join("\n")
+      ? ["", "Previous checkpoint handoff:", "", previousCheckpointHandoff].join("\n")
       : null,
     "",
-    `Trabajá ahora el ticket #${ticket.id}.`,
-    "",
+    `## Current ticket #${ticket.id}`,
     formatTicketFull(ticket),
     "",
-    "Flujo obligatorio:",
-    `1) Al arrancar: spec_flow_update(id: ${ticket.id}, status: \"in_progress\")`,
-    "2) Implementá solo el alcance del ticket actual.",
-    `3) Completá handoff del ticket vía spec_flow_update (summary/files/decisions/verification/risks/next ticket).`,
-    "4) Si cerrás un checkpoint, la extensión te va a pedir una síntesis estructurada del bloque y va a escribir el archivo automáticamente.",
-    `5) Cerrá con: spec_flow_handoff_loop_done(ticket_id: ${ticket.id}, feature_key: \"${ticket.feature_key}\")`,
-    `6) Si este ticket no es checkpoint, el siguiente ticket del bloque llegará en esta misma sesión. Si este ticket es checkpoint, se abrirá una nueva sesión para el próximo bloque después de guardar el handoff.`,
-    "",
-    "No arrastres contexto de otros bloques salvo dependencias explícitas o el handoff del checkpoint previo.",
+    compactTicketInstruction(ticket),
   ]
     .filter(Boolean)
     .join("\n");
@@ -500,7 +672,7 @@ function buildBlockKickoffMessage(
 type StartImplementationContext = {
   cwd: string;
   ui: {
-    notify: (message: string, level: "info" | "success" | "warning" | "error") => void;
+    notify: (message: string, level: "info" | "info" | "warning" | "error") => void;
     select: (title: string, items: string[]) => Promise<string | undefined>;
   };
   sessionManager: {
@@ -510,7 +682,7 @@ type StartImplementationContext = {
     parentSession?: string;
     withSession: (ctx: {
       sendUserMessage: (content: string) => Promise<void>;
-      ui: { notify: (message: string, level: "info" | "success" | "warning" | "error") => void };
+      ui: { notify: (message: string, level: "info" | "info" | "warning" | "error") => void };
     }) => Promise<void>;
   }) => Promise<{ cancelled?: boolean }>;
 };
@@ -520,16 +692,16 @@ async function confirmSelectedImplementationTicket(
   ctx: StartImplementationContext
 ): Promise<boolean> {
   ctx.ui.notify(
-    `Ticket seleccionado: #${ticket.id} — ${ticket.title} (${ticket.feature_key})`,
+    `Selected ticket: #${ticket.id} — ${ticket.title} (${ticket.feature_key})`,
     "info"
   );
 
-  const choice = await ctx.ui.select("¿Querés avanzar con este ticket?", [
-    "Sí, avanzar",
-    "No, cancelar",
+  const choice = await ctx.ui.select("Proceed with this ticket?", [
+    "Yes, proceed",
+    "No, cancel",
   ]);
 
-  return choice === "Sí, avanzar";
+  return choice === "Yes, proceed";
 }
 
 async function startImplementationByTicket(
@@ -604,7 +776,7 @@ async function startImplementationByTicket(
     ).sort();
 
     if (unfinishedSpecs.length === 0) {
-      ctx.ui.notify("All tickets are done. Nothing to implement.", "success");
+      ctx.ui.notify("All tickets are done. Nothing to implement.", "info");
       return;
     }
 
@@ -638,7 +810,7 @@ async function startImplementationByTicket(
 
   const confirmed = await confirmSelectedImplementationTicket(ticket, ctx);
   if (!confirmed) {
-    ctx.ui.notify("Implementación cancelada por el usuario.", "warning");
+    ctx.ui.notify("Implementation cancelled by user.", "warning");
     return;
   }
 
@@ -656,13 +828,16 @@ async function startImplementationByTicket(
 
   if (previousCheckpoint && !previousHandoff) {
     ctx.ui.notify(
-      `Falta el checkpoint handoff de #${previousCheckpoint.id}. Cerrá esa síntesis antes de abrir el siguiente bloque.`,
+      `Checkpoint handoff for #${previousCheckpoint.id} is missing. Complete that summary before opening the next block.`,
       "warning"
     );
     return;
   }
 
-  const kickoff = buildBlockKickoffMessage(ticket, scoped, previousHandoff, {
+  const activeTicket = markTicketInProgress(ticket);
+  const activeScoped = listTicketsForSpec(activeTicket.feature_key);
+
+  const kickoff = buildBlockKickoffMessage(activeTicket, activeScoped, previousHandoff, {
     done,
     inProgress: inProgressCount,
     pending: pendingCount,
@@ -674,8 +849,8 @@ async function startImplementationByTicket(
     withSession: async (newSessionCtx) => {
       await newSessionCtx.sendUserMessage(kickoff);
       newSessionCtx.ui.notify(
-        `Implementation started on ticket #${ticket.id}: ${ticket.title}`,
-        "success"
+        `Implementation started on ticket #${activeTicket.id}: ${activeTicket.title}`,
+        "info"
       );
     },
   });

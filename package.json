@@ -7,9 +7,13 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "files": [
     "src/",
     "skills/planning-methodology/",
+    "skills/spec-flow-implementation-protocol/",
     "README.md",
     "LICENSE"
   ],
@@ -43,6 +47,11 @@
     ]
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.79.3",
+    "@earendil-works/pi-coding-agent": "^0.79.3",
+    "@earendil-works/pi-tui": "^0.79.3",
+    "@types/node": "^25.9.3",
+    "typebox": "^1.2.10",
     "typescript": "^6.0.3"
   },
   "publishConfig": {

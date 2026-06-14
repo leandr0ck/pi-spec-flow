@@ -18,6 +18,22 @@ const CONFIG_FILE = "spec-flow.config.json";
 const DEFAULT_TICKETS_FOLDER = "./docs/features";
 const PHASE_ORDER = ["Foundation", "Core Features", "Polish"] as const;
 
+// ── Config types ─────────────────────────────────────────────
+
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface CheckpointReviewConfig {
+  enabled: boolean;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  skills: string[];
+}
+
+export interface SpecFlowConfig {
+  ticketsFolder: string;
+  checkpointReview: CheckpointReviewConfig;
+}
+
 // ── Types (mirrors db.ts for drop-in replacement) ───────────
 
 export interface Ticket {
@@ -102,21 +118,36 @@ export interface UpdateTicketInput {
 // ── Internal state ──────────────────────────────────────────
 
 let _ticketsFolder: string = "";
+let _checkpointReviewConfig: CheckpointReviewConfig = { enabled: false, skills: [] };
 
 // ── Config loading ───────────────────────────────────────────
 
-function loadConfig(cwd: string): { ticketsFolder: string } {
+function loadConfig(cwd: string): SpecFlowConfig {
   const configPath = resolve(cwd, CONFIG_FILE);
+  const defaults: SpecFlowConfig = {
+    ticketsFolder: DEFAULT_TICKETS_FOLDER,
+    checkpointReview: { enabled: false, skills: [] },
+  };
   try {
     const raw = readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);
     if (config.ticketsFolder && typeof config.ticketsFolder === "string") {
-      return { ticketsFolder: config.ticketsFolder };
+      defaults.ticketsFolder = config.ticketsFolder;
+    }
+    if (config.checkpointReview && typeof config.checkpointReview === "object") {
+      const cr = config.checkpointReview;
+      const validLevels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+      defaults.checkpointReview = {
+        enabled: cr.enabled === true,
+        model: typeof cr.model === "string" ? cr.model : undefined,
+        thinkingLevel: validLevels.includes(cr.thinkingLevel) ? cr.thinkingLevel : undefined,
+        skills: Array.isArray(cr.skills) ? cr.skills.filter((s: unknown) => typeof s === "string") : [],
+      };
     }
   } catch {
-    // File missing or invalid — use default
+    // File missing or invalid — use defaults
   }
-  return { ticketsFolder: DEFAULT_TICKETS_FOLDER };
+  return defaults;
 }
 
 function ensureDir(dir: string): void {
@@ -167,6 +198,7 @@ function parseCheckpointValue(value: unknown): boolean {
 export function initTicketsStore(cwd: string): void {
   const config = loadConfig(cwd);
   _ticketsFolder = resolve(cwd, config.ticketsFolder);
+  _checkpointReviewConfig = config.checkpointReview;
   ensureDir(_ticketsFolder);
 }
 
@@ -184,12 +216,19 @@ export function getTicketsFolder(): string {
   return _ticketsFolder;
 }
 
+/**
+ * Return the checkpoint review configuration.
+ */
+export function getCheckpointReviewConfig(): CheckpointReviewConfig {
+  return _checkpointReviewConfig;
+}
+
 // ── Helpers ─────────────────────────────────────────────────
 
 /**
  * Derive a safe feature folder name from the provided feature key.
  */
-function featureFolderFromSpec(featureKey: string): string {
+export function featureFolderFromSpec(featureKey: string): string {
   const base = basename(featureKey);
   const ext = extname(base);
   const raw = (ext ? base.slice(0, -ext.length) : base).trim().toLowerCase();

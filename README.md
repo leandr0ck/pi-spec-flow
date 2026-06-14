@@ -1,140 +1,291 @@
 # pi-spec-flow
 
-Pi extension that turns a technical spec into structured implementation tickets stored as Markdown files.
+A Pi extension for **spec-driven development with controlled context**.
+
+`pi-spec-flow` turns a technical spec into small, validated Markdown tickets and then drives implementation ticket-by-ticket or block-by-block. It is designed for developers who want the benefits of spec-first work without letting every coding session carry the entire spec, backlog, and history in context.
+
+## Why use it?
+
+AI coding works better when the agent has:
+
+- a clear spec before implementation starts
+- small implementation units with acceptance criteria
+- explicit verification steps
+- isolated context per ticket or checkpoint block
+- persisted handoffs instead of relying on chat memory
+
+`pi-spec-flow` provides that workflow inside Pi.
+
+It helps you:
+
+- convert a `spec.md` into implementation-ready tickets
+- validate each ticket before coding begins
+- keep tickets as Markdown files in your repo
+- open fresh implementation sessions with only the relevant ticket context
+- capture structured handoffs after each ticket
+- optionally pause at checkpoints for block-level synthesis and review
 
 ## Install
 
 ```bash
-pi install pi-spec-flow@latest
+pi install npm:pi-spec-flow@latest
 ```
 
-Pi will auto-discover the extension via `pi.extensions` in `package.json`.
+Pi auto-discovers the extension through the `pi.extensions` entry in `package.json`.
+
+## Configuration
+
+Create `spec-flow.config.json` in your project root:
+
+```json
+{
+  "$schema": "./spec-flow.schema.json",
+  "ticketsFolder": "./docs/features",
+  "checkpointReview": {
+    "enabled": false,
+    "model": "claude-sonnet-4-20250514",
+    "thinkingLevel": "high",
+    "skills": ["code-reviewer", "senior-security"]
+  }
+}
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `ticketsFolder` | string | `./docs/features` | Directory where ticket Markdown files are stored |
+| `checkpointReview.enabled` | boolean | `false` | Enable automatic code review after checkpoint tickets |
+| `checkpointReview.model` | string | — | Model to use for the review message |
+| `checkpointReview.thinkingLevel` | string | `medium` | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `checkpointReview.skills` | string[] | `[]` | Skills to request for review, e.g. `code-reviewer`, `senior-security` |
+
 
 ## Quick start
 
 ```text
-1. /spec-flow-init my-spec.md      ← Planning (generates tickets)
-2. /spec-flow-implement             ← Implementation (opens ticket sessions)
+1. Write a spec:       docs/my-feature-spec.md
+2. Plan tickets:       /spec-flow-init docs/my-feature-spec.md --feature=my-feature
+3. Start coding:       /spec-flow-implement --feature=my-feature
 ```
 
-## Workflow
-
-### 1) Planning
+That gives you a loop like this:
 
 ```text
-/spec-flow-init <spec.md>
+Spec → validated tickets → isolated implementation sessions → structured handoffs → next ticket/block
 ```
 
-The extension reads the spec and guides the LLM to create structured, validated tickets following a planning methodology. Tickets are created one by one with a validation loop that ensures each one has acceptance criteria, verification steps, estimated scope, and phase.
+## Core workflow
 
-If tickets already exist for that feature key, you'll be prompted to replace them.
+### 1) Write a technical spec
 
-### 2) Implementation
+Create a Markdown spec with `##` sections. The extension uses these sections to help the LLM break the work into sequenced tickets.
+
+Example:
+
+```markdown
+# Checkout Improvements
+
+## Payment validation
+...
+
+## Error states
+...
+
+## Confirmation page
+...
+```
+
+### 2) Generate validated tickets
 
 ```text
-/spec-flow-implement          (or /spec-flow-start)
+/spec-flow-init <spec.md> [--feature <feature-key>]
 ```
 
-Opens a new isolated session scoped to one ticket. When the ticket is completed, the next one is automatically queued.
-
-**Per-ticket flow:**
+Example:
 
 ```text
-1. Start:        spec_flow_update(id: X, status: "in_progress")
-2. Implement:    code within the ticket scope only
-3. Handoff:      spec_flow_update(id: X, handoff_summary: "...", handoff_files: "...", handoff_decisions: "...", handoff_verification: "...", handoff_risks: "None", handoff_next_ticket: "...")
-4. Close:        spec_flow_handoff_loop_done(ticket_id: X, feature_key: "checkout")
+/spec-flow-init docs/checkout-spec.md --feature=checkout
 ```
 
-If the handoff fields are incomplete, a fix loop starts and you're prompted to complete them before the ticket is marked done.
+The command loads the spec and asks the LLM to create tickets one at a time using `spec_flow_create`, then validate each one with `spec_flow_ticket_loop_done`.
 
-### Feature selection
+Each ticket must include:
 
-When multiple features have pending tickets, `/spec-flow-implement` asks you to choose. You can also pass the feature explicitly:
+- acceptance criteria
+- verification steps
+- source spec path
+- phase: `Foundation`, `Core Features`, or `Polish`
+- estimated scope: `XS`, `S`, `M`, or `L`
+- dependencies, risks, and likely files touched when relevant
+
+Checkpoint tickets are added every 2–3 tasks and at phase boundaries.
+
+### 3) Implement with optimized context
 
 ```text
-/spec-flow-implement --feature=checkout
-/spec-flow-next --new --feature=checkout
+/spec-flow-implement [--feature <feature-key>]
 ```
 
-If only one feature has unfinished tickets, it's selected automatically.
+or:
 
-## Commands reference
+```text
+/spec-flow-next --new --feature=<feature-key>
+```
 
-| Command | Description |
-|---------|-------------|
-| `/spec-flow-init <spec.md>` | Generate validated tickets from a spec |
-| `/spec-flow-implement` | Start implementation (opens ticket sessions) |
-| `/spec-flow-start` | Alias for `/spec-flow-implement` |
-| `/spec-flow-next` | Show next pending ticket (or open it with `--new`) |
+Implementation starts in a fresh session for the next relevant ticket/block. This is the main context-management benefit: the agent does not need to carry the whole planning conversation forward. It gets the current ticket, the current block, and the previous checkpoint handoff when needed.
 
-## Tools reference
+### 4) Close tickets with a structured handoff
 
-The extension also exposes these tools for programmatic access:
+For each ticket, the implementation session follows this pattern:
 
-| Tool | Description |
-|------|-------------|
-| `spec_flow_create` | Create a new ticket |
-| `spec_flow_update` | Update ticket fields or status |
-| `spec_flow_validate_tickets` | Validate all tickets for completeness |
-| `spec_flow_ticket_loop_done` | Validate a single ticket (planning loop) |
-| `spec_flow_handoff_loop_done` | Validate handoff before closing a ticket |
+```text
+1. Mark in progress:
+   spec_flow_update(id: X, status: "in_progress")
+
+2. Implement only the ticket scope.
+
+3. Fill handoff fields:
+   spec_flow_update(
+     id: X,
+     handoff_summary: "...",
+     handoff_files: "...",
+     handoff_decisions: "...",
+     handoff_verification: "...",
+     handoff_risks: "None"
+   )
+
+4. Validate and close:
+   spec_flow_handoff_loop_done(ticket_id: X, feature_key: "checkout")
+```
+
+If required handoff fields are missing, the extension starts a fix loop before marking the ticket done.
+
+### 5) Use checkpoints to prevent context rot
+
+Checkpoint tickets summarize a completed block of work. After a checkpoint closes, the extension asks for a structured checkpoint handoff and saves it automatically.
+
+The next block starts from that concise handoff instead of from a long chat history.
 
 ## Ticket storage
 
 Tickets are stored as Markdown files in:
 
 ```text
-{ticketsFolder}/{feature-name}/*.md
+{ticketsFolder}/{feature-key}/*.md
 ```
 
-Default: `./docs/features` (configurable in `spec-flow.config.json`). Tickets should use `feature_key` for the logical feature name/folder and `source_spec_path` for the real spec document path, for example `docs/implementation-spec.md`.
+Default:
+
+```text
+./docs/features
+```
+
+Each ticket keeps:
+
+- `feature_key`: logical feature/folder name
+- `source_spec_path`: original spec document path
+- planning metadata
+- implementation status
+- handoff fields
+
+Because tickets live in your repo, they can be reviewed, versioned, and resumed across sessions.
+
+## Optional checkpoint code review
+
+When `checkpointReview.enabled` is `true`, the extension adds a review gate after each checkpoint. Once the checkpoint handoff is saved, `pi-spec-flow` switches to the configured review model and thinking level, opens a fresh review session, and asks the configured skills to review the completed block before the next block continues.
+
+This is useful when you want a second-pass review of the code produced in the previous block without mixing that review context into the implementation session.
+
+Recommended model format:
+
+```json
+{
+  "checkpointReview": {
+    "enabled": true,
+    "model": "openai-codex/gpt-5.5",
+    "thinkingLevel": "high",
+    "skills": ["code-reviewer", "senior-security"]
+  }
+}
+```
+
+Use `provider/model` for `checkpointReview.model` when possible so Pi can select the model unambiguously. When the model is selected successfully, Pi's status bar reflects the active review model.
+
+Example queued review:
+
+```text
+**Checkpoint Code Review** — Block ending at #5 using model claude-sonnet-4-20250514 with thinking level: high
+
+Run the following skills as a code review: `$code-reviewer`, `$senior-security`.
+Focus on these changed files: src/auth.ts, src/middleware.ts, tests/auth.test.ts.
+
+After the review, continue with the next block.
+```
+
+## Recommended usage pattern
+
+Use `pi-spec-flow` when the work is larger than a quick one-file change:
+
+- new features
+- multi-file refactors
+- migrations
+- API or data model changes
+- work that needs acceptance criteria and verification
+- work you may need to resume later
+
+For very small fixes, a direct Pi session may be cheaper. For anything that risks context overload, start from a spec and let `pi-spec-flow` keep the context narrow.
 
 ## Flow diagram
 
 ```mermaid
 flowchart TD
-  A[Start /spec-flow-init] --> B[Create ticket with spec_flow_create]
-  B --> C[Validate current ticket with spec_flow_ticket_loop_done]
-  C --> D{Ticket valid?}
-  D -->|No| E[Fix ticket with spec_flow_update]
-  E --> C
-  D -->|Yes| G{More tickets to create?}
-  G -->|Yes| B
-  G -->|No| H[Run global validation: spec_flow_validate_tickets]
-  H --> I{Global checks pass?}
-  I -->|No| J[Fix reported cross-cutting issues]
-  J --> H
-  I -->|Yes| K[Planning complete]
+  A[Write spec.md] --> B[/spec-flow-init]
+  B --> C[Create ticket with spec_flow_create]
+  C --> D[Validate ticket with spec_flow_ticket_loop_done]
+  D --> E{Ticket valid?}
+  E -->|No| F[Fix with spec_flow_update]
+  F --> D
+  E -->|Yes| G{More tickets?}
+  G -->|Yes| C
+  G -->|No| H[spec_flow_validate_tickets]
+  H --> I[Implementation: /spec-flow-implement]
+  I --> J[Fresh session for ticket/block]
+  J --> K[Implement and fill handoff]
+  K --> L[spec_flow_handoff_loop_done]
+  L --> M{Checkpoint?}
+  M -->|Yes| N[Save checkpoint handoff]
+  M -->|No| O[Continue next ticket]
+  N --> P[Open next block with concise handoff]
 ```
 
----
+## Commands
 
-## For developers
+| Command | Description |
+|---------|-------------|
+| `/spec-flow-init <spec.md> [--feature <key>]` | Load a spec and guide ticket creation/validation |
+| `/spec-flow-implement [--feature <key>]` | Start implementation block-by-block until each checkpoint |
+| `/spec-flow-start [--feature <key>]` | Alias for `/spec-flow-implement` |
+| `/spec-flow-next` | Show the next pending ticket in the current session |
+| `/spec-flow-next --new` | Open the next pending ticket in a fresh session |
+| `/spec-flow-next <id> --new` | Open a specific ticket in a fresh session |
+| `/spec-flow-next --feature=<key>` | Scope next-ticket selection to one feature |
 
-### Local development
+## Tools exposed to the LLM
 
-```bash
-npm install
-```
+| Tool | Purpose |
+|------|---------|
+| `spec_flow_create` | Create a structured ticket |
+| `spec_flow_update` | Update ticket fields, status, or handoff data |
+| `spec_flow_ticket_loop_done` | Validate one planning ticket before creating the next |
+| `spec_flow_validate_tickets` | Validate all tickets for cross-cutting completeness |
+| `spec_flow_handoff_loop_done` | Validate implementation handoff and close a ticket |
+| `spec_flow_checkpoint_handoff_save` | Save a structured checkpoint/block handoff |
 
-Pi loads the extension from `package.json`:
+## Changelog
 
-```json
-{
-  "pi": {
-    "extensions": ["./src/index.ts"]
-  }
-}
-```
+This changelog tracks **breaking changes only**. Do not update this section for additive features, bug fixes, documentation edits, or internal refactors that preserve the existing command/tool workflow.
 
-### Publish to npm
+### Breaking changes
 
-```bash
-npm version patch   # or minor, or major
-npm pack --dry-run  # preview included files
-npm publish
-git push --follow-tags
-```
-
-Files included in the published package: `src/`, `skills/planning-methodology/`, `README.md`, `LICENSE`.
+- None recorded.

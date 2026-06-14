@@ -26,8 +26,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerCommands } from "./commands.js";
 import { registerTools } from "./tools.js";
 import { registerEvents } from "./events.js";
+import { registerCompactBuiltinToolRenderers } from "./builtin-tool-renderers.js";
 
 export default function (pi: ExtensionAPI) {
+  registerCompactBuiltinToolRenderers(pi);
   registerCommands(pi);
   registerTools(pi);
   registerEvents(pi);

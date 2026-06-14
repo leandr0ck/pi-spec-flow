@@ -20,6 +20,13 @@ const PLANNING_SKILL_PATH = resolve(
   "planning-methodology",
   "SKILL.md"
 );
+const IMPLEMENTATION_PROTOCOL_SKILL_PATH = resolve(
+  __dirname,
+  "..",
+  "skills",
+  "spec-flow-implementation-protocol",
+  "SKILL.md"
+);
 
 // ── Event registration ──────────────────────────────────────
 
@@ -27,7 +34,7 @@ export function registerEvents(pi: ExtensionAPI): void {
   // Register only runtime skill resources (publishable)
   pi.on("resources_discover", async (_event, _ctx) => {
     return {
-      skillPaths: [PLANNING_SKILL_PATH],
+      skillPaths: [PLANNING_SKILL_PATH, IMPLEMENTATION_PROTOCOL_SKILL_PATH],
     };
   });
 

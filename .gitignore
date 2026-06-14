@@ -5,3 +5,5 @@ dist/
 .agents/
 .pi/
 spec-flow.config.json
+docs
+.spec-flow

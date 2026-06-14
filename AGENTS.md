@@ -39,9 +39,8 @@
    - Minimize output verbosity and avoid unnecessary tool calls.
    - Be concise, action-oriented, and optimize for signal over noise.
 
+
 1. **Always read Pi extension docs first** before changing architecture, APIs, events, tools, or resources.
-   - Main: `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md`
-   - Examples: `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/`
 
 2. Keep modular boundaries (inside `src/`):
    - `commands.ts` only commands
@@ -53,10 +52,12 @@
    - `skills/`
 
    Dev-only workflow skills must live under:
-   - `.agents/skills/`
+   - `.pi/skills/`
 
 4. If adding new runtime resources (skills/prompts/themes), register through `resources_discover` in `src/events.ts`.
 
 5. Preserve backward-safe UX commands:
    - `/spec-flow-init`
    - `/spec-flow-next`
+
+always use English Language 
