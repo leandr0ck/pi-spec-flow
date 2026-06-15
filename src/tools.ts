@@ -13,7 +13,6 @@ import {
   listTicketsForSpec,
   getTicket,
   updateTicket,
-  getCheckpointReviewConfig,
   type Ticket,
   type CreateTicketInput,
   type UpdateTicketInput,
@@ -30,15 +29,17 @@ import {
   getNextTicketInBlock,
 } from "./checkpoints.js";
 import {
-  buildCheckpointHandoffDraft,
   type CheckpointHandoffSections,
   createCheckpointHandoff,
-  loadCheckpointHandoff,
   renderCheckpointHandoffContent,
   saveCheckpointHandoff,
 } from "./checkpoint-handoffs.js";
 import { loadPlanningContext } from "./planning-context.js";
-import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
+import { armTicketValidation } from "./ticket-validation-runner.js";
+import {
+  recordCheckpointHandoffSaved,
+  recordImplementationTicketDone,
+} from "./implementation-flow-runner.js";
 
 type HandoffCheckResult = {
   field: string;
@@ -124,24 +125,6 @@ function conciseFixInstruction(
   ].join("\n");
 }
 
-function markTicketInProgress(ticket: Ticket): Ticket {
-  if (ticket.status !== "pending") return ticket;
-  return updateTicket(ticket.id, { status: "in_progress" }) ?? ticket;
-}
-
-function buildSameSessionTicketMessage(ticket: Ticket): string {
-  return [
-    implementationProtocolLine(),
-    "",
-    `Continue in this same session with ticket #${ticket.id}.`,
-    "",
-    `## Current ticket #${ticket.id}`,
-    formatTicketFull(ticket),
-    "",
-    compactTicketInstruction(ticket),
-  ].join("\n");
-}
-
 function getTextContent(result: { content?: Array<{ type: string; text?: string }> }): string {
   const textPart = result.content?.find(
     (part): part is { type: "text"; text: string } =>
@@ -172,104 +155,6 @@ function renderCompactResult(
 
 function normalizeSectionEntries(entries: string[]): string[] {
   return entries.map((entry) => entry.trim()).filter(Boolean);
-}
-
-function buildCheckpointHandoffRequest(ticket: Ticket): string {
-  const orderedTickets = listTicketsForSpec(ticket.feature_key);
-  const block = getBlockForTicket(orderedTickets, ticket.id);
-  if (!ticket.is_checkpoint || !block) {
-    return `Checkpoint #${ticket.id} reached.`;
-  }
-
-  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
-  const draft = buildCheckpointHandoffDraft(block.tickets, nextAfterBlock?.id ?? null);
-  const nextRecommended = nextAfterBlock ? `#${nextAfterBlock.id}` : "None";
-
-  return [
-    `Checkpoint #${ticket.id} reached. Next action: call \`spec_flow_checkpoint_handoff_save\` with a structured block summary. Do not write a freeform handoff. Use only evidence from ticket handoffs; use empty arrays or "None" when evidence is missing.`,
-    "",
-    "Block context:",
-    "",
-    draft,
-    "",
-    `Call now: spec_flow_checkpoint_handoff_save(checkpoint_ticket_id: ${ticket.id}, feature_key: "${ticket.feature_key}", next_recommended_ticket: "${nextRecommended}", ...)`,
-  ].join("\n");
-}
-
-function extractFilesFromCheckpointHandoff(cwd: string, ticket: Ticket): string[] {
-  const handoff = loadCheckpointHandoff(cwd, ticket.feature_key, ticket.id);
-  if (!handoff) return [];
-  const match = handoff.content.match(/### Files changed\n([\s\S]*?)(?=\n### |$)/i);
-  if (!match) return [];
-  return match[1]
-    .split("\n")
-    .map((line) => line.replace(/^-\s*/, "").trim())
-    .filter((line) => line.length > 0 && !/^none recorded$/i.test(line));
-}
-
-async function queueNextBlockAfterCheckpointHandoff(
-  pi: ExtensionAPI,
-  ticket: Ticket,
-  _ctx: { cwd: string },
-): Promise<string> {
-  const orderedTickets = listTicketsForSpec(ticket.feature_key);
-  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
-
-  // ── Checkpoint review (if configured) ──
-  const reviewConfig = getCheckpointReviewConfig();
-  if (reviewConfig.enabled && reviewConfig.skills.length > 0) {
-    const filesChanged = extractFilesFromCheckpointHandoff(_ctx.cwd, ticket);
-    const filesHint = filesChanged.length > 0
-      ? ` Focus on these changed files: ${filesChanged.join(", ")}.`
-      : "";
-    const nextHint = nextAfterBlock
-      ? ` After the review, continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`
-      : " After the review, report final findings. No remaining tickets.";
-
-    return [
-      "",
-      `Run checkpoint code review: ${reviewConfig.skills.map((s) => `$${s}`).join(", ")}.${filesHint}${nextHint}`,
-    ].join("\n");
-  }
-
-  // ── No code review config ──
-  if (nextAfterBlock) {
-    return `\nCheckpoint handoff saved. Commit changes, then continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`;
-  }
-
-  return "\nCheckpoint handoff saved. No remaining tickets in this feature.";
-}
-
-function queueImplementationContinuation(
-  pi: ExtensionAPI,
-  cwd: string,
-  ticket: Ticket,
-): string {
-  const orderedTickets = listTicketsForSpec(ticket.feature_key);
-  const nextInBlock = getNextTicketInBlock(orderedTickets, ticket.id);
-
-  // Auto-chain to next ticket in same block (non-blocking message is OK here)
-  if (nextInBlock && !ticket.is_checkpoint) {
-    const activeNext = markTicketInProgress(nextInBlock);
-    pi.sendUserMessage(buildSameSessionTicketMessage(activeNext), {
-      deliverAs: "followUp",
-    });
-    return `\nAuto-chain enabled: queued ticket #${activeNext.id} in the current session.`;
-  }
-
-  // Checkpoint: return instructions in tool response (no sendUserMessage)
-  if (ticket.is_checkpoint) {
-    return "\n\n" + buildCheckpointHandoffRequest(ticket);
-  }
-
-  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
-
-  // End of block without checkpoint: suggest next command (no injection)
-  if (nextAfterBlock) {
-    return `\nBlock ended. Continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`;
-  }
-
-  return "\nAuto-chain: no remaining pending/in-progress tickets in this feature.";
 }
 
 // ── Tool registration ───────────────────────────────────────
@@ -406,9 +291,10 @@ export function registerTools(pi: ExtensionAPI): void {
       };
 
       const ticket = insertFullTicket(input);
+      armTicketValidation(pi, ticket);
       const summary = formatTicketCompact(ticket);
       return {
-        content: [{ type: "text", text: `Created ${summary}` }],
+        content: [{ type: "text", text: `Created ${summary}. Ticket validation armed.` }],
         details: {
           ticket,
           summary: `✓ Created #${ticket.id} ${ticket.title}`,
@@ -684,7 +570,8 @@ export function registerTools(pi: ExtensionAPI): void {
 
       const shouldAutoChain = params.status === "done" && params.auto_next !== false;
       if (shouldAutoChain) {
-        text += queueImplementationContinuation(pi, ctx.cwd, updated);
+        recordImplementationTicketDone(pi, updated, true);
+        text += "\nImplementation flow recorded; continuation will run after this turn.";
       }
 
       return {
@@ -790,7 +677,8 @@ export function registerTools(pi: ExtensionAPI): void {
 
           let text = `✅ Handoff complete. Ticket #${ticket.id} marked as done.`;
           if (params.auto_next !== false) {
-            text += queueImplementationContinuation(pi, ctx.cwd, doneTicket);
+            recordImplementationTicketDone(pi, doneTicket, true);
+            text += "\nImplementation flow recorded; continuation will run after this turn.";
           }
 
           return {
@@ -839,7 +727,8 @@ export function registerTools(pi: ExtensionAPI): void {
 
         let text = `✅ Handoff fixed after ${iter} pass(es). Ticket #${ticket.id} marked as done.`;
         if (params.auto_next !== false) {
-          text += queueImplementationContinuation(pi, ctx.cwd, doneTicket);
+          recordImplementationTicketDone(pi, doneTicket, true);
+          text += "\nImplementation flow recorded; continuation will run after this turn.";
         }
 
         return {
@@ -996,7 +885,8 @@ export function registerTools(pi: ExtensionAPI): void {
       saveCheckpointHandoff(ctx.cwd, createCheckpointHandoff(block.tickets, content));
 
       let text = `Checkpoint handoff saved for #${ticket.id}.`;
-      text += await queueNextBlockAfterCheckpointHandoff(pi, ticket, ctx);
+      recordCheckpointHandoffSaved(pi, ticket, true);
+      text += "\nImplementation flow recorded; review or next-block guidance will run after this turn.";
 
       return {
         content: [{ type: "text", text }],
@@ -1223,235 +1113,5 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  // ── spec_flow_ticket_loop_done ───────────────────────────
-  //  Per-ticket loop: validates ONE ticket at a time.
-  //  If it passes → LLM creates the next ticket and calls done again.
-  //  If it fails → loop on that ticket until fixed or max iterations.
 
-  pi.registerTool({
-    name: "spec_flow_ticket_loop_done",
-    label: "Tick Loop Done",
-    description:
-      "Validate ONE specific ticket. If it passes, create the next ticket. If it fails, fix it and call again. Loop stops when the ticket passes or max_iterations is reached.",
-    promptSnippet:
-      "spec_flow_ticket_loop_done(ticket_id, feature_key, max_iterations?)",
-    promptGuidelines: [
-      "Use spec_flow_ticket_loop_done after each created ticket; fix missing fields with spec_flow_update, then validate the same ticket again.",
-      "When all individual tickets pass, run spec_flow_validate_tickets.",
-    ],
-    parameters: Type.Object({
-      ticket_id: Type.Number({
-        description: "The ID of the ticket to validate",
-      }),
-      feature_key: Type.String({
-        description: "Feature key/folder, used to name the loop state",
-      }),
-      max_iterations: Type.Optional(
-        Type.Number({
-          description: "Max fix iterations for this ticket (default: 3).",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const maxIter = params.max_iterations ?? 3;
-      let state = loadLoopState(ctx.cwd);
-      const loopName = params.feature_key;
-
-      if (ctx.hasPendingMessages()) {
-        return {
-          content: [{ type: "text", text: "Pending messages already queued. Call again after processing them." }],
-          details: {},
-        };
-      }
-
-      if (state && state.status === "active" && state.name !== loopName) {
-        return {
-          content: [{
-            type: "text",
-            text: `Another loop is active (${state.name}). Finish it first before validating ticket #${params.ticket_id}.`,
-          }],
-          details: {},
-        };
-      }
-
-      initTicketsStore(ctx.cwd);
-      const ticket = getTicket(params.ticket_id);
-      if (!ticket) {
-        return {
-          content: [{ type: "text", text: `Ticket #${params.ticket_id} not found. Create it first with spec_flow_create.` }],
-          details: {},
-        };
-      }
-
-      // Validate this specific ticket — point by point
-      type CheckResult = { field: string; ok: boolean; value: string; help: string };
-      const checks: CheckResult[] = [
-        {
-          field: "source_spec_path",
-          ok: !!(ticket.source_spec_path && ticket.source_spec_path.trim().length > 0),
-          value: ticket.source_spec_path?.trim().slice(0, 80) || "—",
-          help: "Path to the real source spec document, e.g. 'docs/implementation-spec.md'",
-        },
-        {
-          field: "acceptance_criteria",
-          ok: !!(ticket.acceptance_criteria && ticket.acceptance_criteria.trim().length > 0),
-          value: ticket.acceptance_criteria?.trim().slice(0, 80) || "—",
-          help: "Testable conditions as bullet points, e.g. '- [ ] User can register with email/password'",
-        },
-        {
-          field: "verification",
-          ok: !!(ticket.verification && ticket.verification.trim().length > 0),
-          value: ticket.verification?.trim().slice(0, 80) || "—",
-          help: "How to verify, e.g. '- [ ] Tests pass: npm test'",
-        },
-        {
-          field: "estimated_scope",
-          ok: !!(ticket.estimated_scope && ["XS", "S", "M", "L"].includes(ticket.estimated_scope)),
-          value: ticket.estimated_scope || "—",
-          help: "Must be XS (1 file), S (1-2), M (3-5), or L (5-8)",
-        },
-        {
-          field: "phase",
-          ok: !!ticket.phase,
-          value: ticket.phase || "—",
-          help: "Foundation, Core Features, or Polish",
-        },
-      ];
-
-      const passed = checks.every((c) => c.ok);
-      const missingFields = missingFieldNames(checks);
-
-      function buildChecklist(): string {
-        const lines = [
-          `## Validation for #${params.ticket_id} "${ticket!.title}"`,
-          "",
-          "| Check | Status | Current |",
-          "|-------|--------|--------|",
-        ];
-        for (const c of checks) {
-          const icon = c.ok ? "✅" : "❌";
-          const val = c.ok ? c.value : `**MISSING** — ${c.help}`;
-          lines.push(`| ${c.field} | ${icon} | ${val} |`);
-        }
-        return lines.join("\n");
-      }
-
-      // ── No active loop → first validation of this ticket ──
-      if (!state || state.status !== "active") {
-        if (passed) {
-          const summary = `✓ Ticket #${params.ticket_id} passes. Create the next ticket and continue.`;
-          return {
-            content: [{
-              type: "text",
-              text: summary,
-            }],
-            details: {
-              summary,
-              checklist: buildChecklist(),
-              passed: true,
-              ticket_id: params.ticket_id,
-            },
-          };
-        }
-
-        // Start fix loop on this ticket
-        state = createLoopState(ctx.cwd, loopName, maxIter);
-        state.iteration++; // first pass done
-        saveLoopState(ctx.cwd, state);
-
-        const prompt = [
-          `🔁 **FIX LOOP** — #${params.ticket_id} (1/${maxIter})`,
-          "Re-read the source spec if needed.",
-          conciseFixInstruction(
-            params.ticket_id,
-            missingFields,
-            `spec_flow_ticket_loop_done(ticket_id: ${params.ticket_id}, feature_key: "${params.feature_key}")`,
-          ),
-        ].join("\n");
-        pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-
-        return {
-          content: [{ type: "text", text: `Missing fields on #${params.ticket_id}: ${missingFields.join(", ")}.` }],
-          details: {
-            summary: `⚠ #${params.ticket_id}: missing ${missingFields.join(", ")}.`,
-            checklist: buildChecklist(),
-            passed: false,
-            ticket_id: params.ticket_id,
-          },
-        };
-      }
-
-      // ── Active loop: advance iteration ──
-      state.iteration++;
-      saveLoopState(ctx.cwd, state);
-
-      const iter = state.iteration - 1;
-
-      if (passed) {
-        state.status = "completed";
-        state.completedAt = new Date().toISOString();
-        saveLoopState(ctx.cwd, state);
-        const summary = `✓ Ticket #${params.ticket_id} fixed after ${iter} pass(es). Create the next ticket and continue.`;
-        return {
-          content: [{
-            type: "text",
-            text: summary,
-          }],
-          details: {
-            summary,
-            checklist: buildChecklist(),
-            passed: true,
-            ticket_id: params.ticket_id,
-          },
-        };
-      }
-
-      if (iter >= state.maxIterations) {
-        state.status = "stopped";
-        state.completedAt = new Date().toISOString();
-        saveLoopState(ctx.cwd, state);
-        pi.sendUserMessage([
-          `⚠️ **FIX LOOP STOPPED** — Max iterations (${state.maxIterations}) on #${params.ticket_id} "${ticket.title}"`,
-          `Still missing: ${missingFields.join(", ")}. Review manually.`,
-        ].join("\n"));
-        return {
-          content: [{ type: "text", text: `Max iterations on #${params.ticket_id}. Loop stopped.` }],
-          details: { checklist: buildChecklist(), missing_fields: missingFields },
-        };
-      }
-
-      // Still failing, try again
-      pi.sendUserMessage(
-        [
-          `🔁 **FIX LOOP** — #${params.ticket_id} "${ticket.title}" | Pass ${iter}/${state.maxIterations}`,
-          "Re-read the source spec if needed.",
-          conciseFixInstruction(
-            params.ticket_id,
-            missingFields,
-            `spec_flow_ticket_loop_done(ticket_id: ${params.ticket_id}, feature_key: "${params.feature_key}")`,
-          ),
-        ].join("\n"),
-        { deliverAs: "followUp" },
-      );
-      return {
-        content: [{ type: "text", text: `Still missing fields on #${params.ticket_id}: ${missingFields.join(", ")}.` }],
-        details: {
-          summary: `⚠ #${params.ticket_id}: still missing ${missingFields.join(", ")}.`,
-          checklist: buildChecklist(),
-          passed: false,
-          ticket_id: params.ticket_id,
-        },
-      };
-    },
-    renderCall(args, theme) {
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("spec_flow_ticket_loop_done"))} ${theme.fg("accent", `#${args.ticket_id ?? ""}`)}`,
-        0,
-        0,
-      );
-    },
-    renderResult(result, { expanded }, theme) {
-      return renderCompactResult(result, expanded, theme);
-    },
-  });
 }

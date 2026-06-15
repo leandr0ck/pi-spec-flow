@@ -25,7 +25,7 @@ import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "./checkpoi
 import { savePlanningContext } from "./planning-context.js";
 import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
 
-type ModelLike = {
+export type ModelLike = {
   provider: string;
   id: string;
   name?: string;
@@ -112,7 +112,7 @@ function parseProviderModel(value: string): { provider: string; modelId: string 
   };
 }
 
-function resolveConfiguredModel(
+export function resolveConfiguredModel(
   modelRegistry: { find: (provider: string, modelId: string) => ModelLike | undefined; getAll: () => ModelLike[] },
   configuredModel: string,
 ): { model?: ModelLike; warning?: string } {
@@ -287,10 +287,10 @@ export function registerCommands(pi: ExtensionAPI): void {
         "**Your task — create and validate tickets one at a time:**",
         "",
         "1. Create ticket #1 using `spec_flow_create`. Start with Foundation phase.",
-        `2. Validate it: \`spec_flow_ticket_loop_done(ticket_id: <id>, feature_key: "${featureName}")\``,
-        "3. If it passes → create the next ticket, validate it. Repeat for all tickets.",
-        "4. If it fails → the fix loop starts with a validation checklist. **Re-read the source spec document** to recall context, then: `spec_flow_update` to fix only the failing fields, `spec_flow_ticket_loop_done` again with the same ID.",
-        "5. After ALL tickets pass individually, run \`spec_flow_validate_tickets\` for cross-cutting checks.",
+        "2. Stop after each `spec_flow_create`. The extension validates the created ticket automatically after the turn.",
+        "3. If validation passes, the extension will tell you to create the next ticket. Repeat until all tickets are created.",
+        "4. If validation fails, the extension will send a fix checklist. **Re-read the source spec document** if needed, then use `spec_flow_update` to fix only the failing fields. The extension will re-validate automatically.",
+        "5. After ALL tickets pass individually, run `spec_flow_validate_tickets` for cross-cutting checks.",
         "",
         "Create Foundation phase tickets first, then Core Features, then Polish. Add checkpoint tickets every 2-3 tasks and at phase boundaries.",
         `Use feature_key: "${featureName}" for all tickets (this is the feature key/folder).`,

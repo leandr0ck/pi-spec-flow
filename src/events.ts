@@ -10,6 +10,8 @@ import {
   listTickets,
 } from "./tickets-fs.js";
 import { loadLoopState } from "./ticket-loop.js";
+import { runTicketValidationEvent } from "./ticket-validation-runner.js";
+import { hasActiveImplementationFlow, runImplementationFlowEvent } from "./implementation-flow-runner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -63,5 +65,15 @@ export function registerEvents(pi: ExtensionAPI): void {
         `🔁 Ticket loop: ${loop.iteration}/${loop.maxIterations}`
       );
     }
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
+    initTicketsStore(ctx.cwd);
+    if (hasActiveImplementationFlow(ctx)) {
+      await runImplementationFlowEvent(pi, ctx, event);
+      return;
+    }
+    await runTicketValidationEvent(pi, ctx);
+    await runImplementationFlowEvent(pi, ctx, event);
   });
 }

@@ -108,7 +108,7 @@ Example:
 /spec-flow-init docs/checkout-spec.md --feature=checkout
 ```
 
-The command loads the spec and asks the LLM to create tickets one at a time using `spec_flow_create`, then validate each one with `spec_flow_ticket_loop_done`.
+The command loads the spec and asks the LLM to create tickets one at a time using `spec_flow_create`. After each created ticket, the extension validates it automatically and either prompts for targeted fixes or allows the next ticket to be created.
 
 Each ticket must include:
 
@@ -242,7 +242,7 @@ For very small fixes, a direct Pi session may be cheaper. For anything that risk
 flowchart TD
   A[Write spec.md] --> B[/spec-flow-init]
   B --> C[Create ticket with spec_flow_create]
-  C --> D[Validate ticket with spec_flow_ticket_loop_done]
+  C --> D[Extension validates created ticket]
   D --> E{Ticket valid?}
   E -->|No| F[Fix with spec_flow_update]
   F --> D
@@ -277,7 +277,6 @@ flowchart TD
 |------|---------|
 | `spec_flow_create` | Create a structured ticket |
 | `spec_flow_update` | Update ticket fields, status, or handoff data |
-| `spec_flow_ticket_loop_done` | Validate one planning ticket before creating the next |
 | `spec_flow_validate_tickets` | Validate all tickets for cross-cutting completeness |
 | `spec_flow_handoff_loop_done` | Validate implementation handoff and close a ticket |
 | `spec_flow_checkpoint_handoff_save` | Save a structured checkpoint/block handoff |
