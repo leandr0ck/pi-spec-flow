@@ -1,7 +1,7 @@
 /**
  * spec-flow commands — /spec-flow-init, /spec-flow-next, /spec-flow-implement
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { resolve, basename, relative, isAbsolute } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import {
@@ -13,15 +13,23 @@ import {
   listTicketsForSpec,
   getTicket,
   updateTicket,
+  getCheckpointReviewConfig,
   type Ticket,
 } from "./tickets-fs.js";
 import { formatTicketFull } from "./formatters.js";
 import { parseSpecSections, buildSpecSummary } from "./spec-parser.js";
 import { loadMethodology } from "./methodology-loader.js";
 import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
-import { loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
+import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
 import { savePlanningContext } from "./planning-context.js";
 import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
+import {
+  buildCheckpointReviewSystemPrompt,
+  buildCheckpointReviewTask,
+  loadCheckpointReviewSkillInstructions,
+} from "./checkpoint-review-subagent.js";
+import { appendDebugLog } from "./debug-log.js";
+import { recordCommandOwnedImplementationChain } from "./implementation-flow-runner.js";
 
 type SpecFlowInitArgs = {
   specArg: string;
@@ -365,7 +373,7 @@ export function registerCommands(pi: ExtensionAPI): void {
     description:
       "Start implementation block-by-block until each checkpoint (select feature if multiple, or pass --feature)",
     handler: async (args, ctx) => {
-      await startImplementationByTicket(args, ctx);
+      await startImplementationByTicket(pi, args, ctx);
     },
   });
 
@@ -373,9 +381,184 @@ export function registerCommands(pi: ExtensionAPI): void {
   pi.registerCommand("spec-flow-start", {
     description: "Alias of /spec-flow-implement",
     handler: async (args, ctx) => {
-      await startImplementationByTicket(args, ctx);
+      await startImplementationByTicket(pi, args, ctx);
     },
   });
+
+  // ── /spec-flow-checkpoint-review ────────────────────────
+
+  pi.registerCommand("spec-flow-checkpoint-review", {
+    description:
+      "Open a fresh review session for a checkpoint using only tickets and checkpoint handoff context",
+    handler: async (args, ctx) => {
+      await startFreshCheckpointReviewSession(pi, args, ctx);
+    },
+  });
+}
+
+type CheckpointReviewCommandArgs = {
+  ticketId: number | null;
+  feature: string | null;
+};
+
+function parseCheckpointReviewCommandArgs(rawArgs?: string): CheckpointReviewCommandArgs {
+  if (!rawArgs || rawArgs.trim().length === 0) return { ticketId: null, feature: null };
+
+  const tokens = rawArgs.trim().split(/\s+/);
+  let ticketId: number | null = null;
+  let feature: string | null = null;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token) continue;
+
+    if (token.startsWith("--feature=")) {
+      feature = token.slice("--feature=".length).trim() || null;
+      continue;
+    }
+
+    if (token === "--feature" && i + 1 < tokens.length) {
+      feature = tokens[i + 1].trim() || null;
+      i += 1;
+      continue;
+    }
+
+    if (/^\d+$/.test(token)) {
+      ticketId = Number(token);
+    }
+  }
+
+  return { ticketId, feature };
+}
+
+function resolveReviewModel(ctx: ExtensionCommandContext, configuredModel: string | undefined): any | undefined {
+  if (!configuredModel?.trim()) return undefined;
+  const candidates = configuredModel
+    .split(",")
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+
+  const available = ctx.modelRegistry.getAvailable();
+  const providerPriority = ["openai-codex", "anthropic", "github-copilot", "openrouter", "openai"];
+
+  for (const candidate of candidates) {
+    if (candidate.includes("/")) {
+      const [provider, ...modelParts] = candidate.split("/");
+      const modelId = modelParts.join("/");
+      const model = available.find((entry: any) => entry.provider === provider && entry.id === modelId)
+        ?? ctx.modelRegistry.find(provider, modelId);
+      if (model && ctx.modelRegistry.hasConfiguredAuth(model)) return model;
+      continue;
+    }
+
+    const matches = available.filter((entry: any) => entry.id === candidate);
+    matches.sort((a: any, b: any) => {
+      const aIndex = providerPriority.indexOf(a.provider);
+      const bIndex = providerPriority.indexOf(b.provider);
+      return (aIndex < 0 ? 999 : aIndex) - (bIndex < 0 ? 999 : bIndex);
+    });
+    if (matches[0]) return matches[0];
+  }
+
+  return undefined;
+}
+
+async function startFreshCheckpointReviewSession(
+  pi: ExtensionAPI,
+  args: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  initTicketsStore(ctx.cwd);
+  const parsed = parseCheckpointReviewCommandArgs(args);
+  if (parsed.ticketId == null) {
+    ctx.ui.notify("Usage: /spec-flow-checkpoint-review <checkpoint-ticket-id> [--feature feature-key]", "error");
+    return;
+  }
+
+  const ticket = getTicket(parsed.ticketId);
+  if (!ticket) {
+    ctx.ui.notify(`Checkpoint ticket #${parsed.ticketId} not found.`, "error");
+    return;
+  }
+  if (parsed.feature && ticket.feature_key !== parsed.feature) {
+    ctx.ui.notify(`Ticket #${ticket.id} belongs to "${ticket.feature_key}", not "${parsed.feature}".`, "error");
+    return;
+  }
+  if (!ticket.is_checkpoint) {
+    ctx.ui.notify(`Ticket #${ticket.id} is not a checkpoint ticket.`, "error");
+    return;
+  }
+
+  const reviewConfig = getCheckpointReviewConfig();
+  if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
+    ctx.ui.notify("Checkpoint review is not enabled or has no review skills configured.", "warning");
+    return;
+  }
+
+  const selectedModel = resolveReviewModel(ctx, reviewConfig.model);
+  const originalTools = pi.getActiveTools();
+  const readOnlyTools = ["read", "grep", "find", "ls", "bash"].filter((tool) =>
+    pi.getAllTools().some((availableTool) => availableTool.name === tool),
+  );
+
+  const skillInstructions = loadCheckpointReviewSkillInstructions(reviewConfig.skills, ctx.cwd);
+  const reviewPrompt = [
+    buildCheckpointReviewSystemPrompt(skillInstructions),
+    "",
+    "---",
+    "",
+    "You are starting from a fresh session on purpose.",
+    "Do not use or request the implementation conversation. Treat this as an independent third-party code review.",
+    "Use only the repository state, the tickets, and the checkpoint handoff included below.",
+    "Do not modify files. Do not continue implementation. Do not start the next ticket. End after the review.",
+    "",
+    buildCheckpointReviewTask(ticket, ctx.cwd),
+  ].join("\n");
+
+  appendDebugLog(ctx.cwd, "checkpoint-review-fresh-session", "start", {
+    ticketId: ticket.id,
+    featureKey: ticket.feature_key,
+    configuredModel: reviewConfig.model,
+    selectedModel: selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : undefined,
+    thinking: reviewConfig.thinkingLevel,
+    skills: reviewConfig.skills,
+  });
+
+  if (selectedModel) {
+    const switched = await pi.setModel(selectedModel);
+    if (!switched) {
+      ctx.ui.notify(`Failed to switch to review model ${selectedModel.provider}/${selectedModel.id}.`, "error");
+      return;
+    }
+  } else if (reviewConfig.model) {
+    ctx.ui.notify(`No available configured review model from: ${reviewConfig.model}. Using current model.`, "warning");
+  }
+
+  if (reviewConfig.thinkingLevel) {
+    pi.setThinkingLevel(reviewConfig.thinkingLevel as any);
+  }
+  if (readOnlyTools.length > 0) {
+    pi.setActiveTools(readOnlyTools);
+  }
+
+  const currentSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
+  const result = await ctx.newSession({
+    parentSession: currentSessionFile,
+    withSession: async (reviewCtx) => {
+      await reviewCtx.sendUserMessage(reviewPrompt);
+      await waitForTurnStart(reviewCtx);
+      await reviewCtx.waitForIdle();
+      reviewCtx.ui.notify(
+        `Fresh checkpoint review completed for #${ticket.id}. This session intentionally did not inherit implementation context.`,
+        "info",
+      );
+    },
+  });
+
+  if (result.cancelled) {
+    pi.setActiveTools(originalTools);
+    ctx.ui.notify("Fresh checkpoint review session cancelled.", "warning");
+  }
 }
 
 type SpecFlowNextArgs = {
@@ -499,27 +682,22 @@ function buildBlockKickoffMessage(
     .join("\n");
 }
 
-type StartImplementationContext = {
-  cwd: string;
-  ui: {
-    notify: (message: string, level: "info" | "info" | "warning" | "error") => void;
-    select: (title: string, items: string[]) => Promise<string | undefined>;
-  };
-  sessionManager: {
-    getSessionFile: () => string | null | undefined;
-  };
-  newSession: (options: {
-    parentSession?: string;
-    withSession: (ctx: {
-      sendUserMessage: (content: string) => Promise<void>;
-      ui: { notify: (message: string, level: "info" | "info" | "warning" | "error") => void };
-    }) => Promise<void>;
-  }) => Promise<{ cancelled?: boolean }>;
-};
+async function waitForTurnStart(ctx: { isIdle: () => boolean }): Promise<void> {
+  while (ctx.isIdle()) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForQueuedTurnsToDrain(ctx: ExtensionCommandContext): Promise<void> {
+  while (ctx.hasPendingMessages()) {
+    if (ctx.isIdle()) await waitForTurnStart(ctx);
+    await ctx.waitForIdle();
+  }
+}
 
 async function confirmSelectedImplementationTicket(
   ticket: Ticket,
-  ctx: StartImplementationContext
+  ctx: ExtensionCommandContext
 ): Promise<boolean> {
   ctx.ui.notify(
     `Selected ticket: #${ticket.id} — ${ticket.title} (${ticket.feature_key})`,
@@ -535,8 +713,9 @@ async function confirmSelectedImplementationTicket(
 }
 
 async function startImplementationByTicket(
+  pi: ExtensionAPI,
   args: string | undefined,
-  ctx: StartImplementationContext
+  ctx: ExtensionCommandContext
 ): Promise<void> {
   initTicketsStore(ctx.cwd);
   if (!ticketsExist()) {
@@ -666,6 +845,8 @@ async function startImplementationByTicket(
 
   const activeTicket = markTicketInProgress(ticket);
   const activeScoped = listTicketsForSpec(activeTicket.feature_key);
+  const activeBlock = getBlockForTicket(activeScoped, activeTicket.id);
+  const checkpointTicket = activeBlock?.checkpointTicket ?? null;
 
   const kickoff = buildBlockKickoffMessage(activeTicket, activeScoped, previousHandoff, {
     done,
@@ -674,14 +855,43 @@ async function startImplementationByTicket(
     total: scoped.length,
   });
 
-  await ctx.newSession({
-    parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
-    withSession: async (newSessionCtx) => {
-      await newSessionCtx.sendUserMessage(kickoff);
-      newSessionCtx.ui.notify(
-        `Implementation started on ticket #${activeTicket.id}: ${activeTicket.title}`,
-        "info"
-      );
-    },
-  });
+  recordCommandOwnedImplementationChain(pi, activeTicket);
+  ctx.ui.notify(
+    `Implementation chain started on ticket #${activeTicket.id}: ${activeTicket.title}`,
+    "info",
+  );
+  pi.sendUserMessage(kickoff);
+  await waitForTurnStart(ctx);
+  await ctx.waitForIdle();
+  await waitForQueuedTurnsToDrain(ctx);
+
+  if (!checkpointTicket) {
+    ctx.ui.notify("Implementation chain reached idle; no checkpoint ticket was found for this block.", "info");
+    return;
+  }
+
+  const completedCheckpoint = getTicket(checkpointTicket.id);
+  const savedHandoff = completedCheckpoint
+    ? loadCheckpointHandoff(ctx.cwd, completedCheckpoint.feature_key, completedCheckpoint.id)
+    : null;
+
+  if (!completedCheckpoint || completedCheckpoint.status !== "done" || !savedHandoff) {
+    ctx.ui.notify(
+      `Implementation chain reached idle before checkpoint #${checkpointTicket.id} was fully closed and handed off. No review started.`,
+      "warning",
+    );
+    return;
+  }
+
+  const reviewConfig = getCheckpointReviewConfig();
+  if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
+    ctx.ui.notify(`Checkpoint #${completedCheckpoint.id} complete. Review is disabled; chain stops here.`, "info");
+    return;
+  }
+
+  await startFreshCheckpointReviewSession(
+    pi,
+    `${completedCheckpoint.id} --feature=${completedCheckpoint.feature_key}`,
+    ctx,
+  );
 }

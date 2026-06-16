@@ -26,7 +26,7 @@
 ├── skills/
 │   └── planning-methodology/
 │       └── SKILL.md
-└── .agents/skills/
+└── .pi/skills/
     └── spec-flow-extension-development/
         └── SKILL.md
 ```
@@ -63,21 +63,29 @@
    - `commands.ts` only commands
    - `tools.ts` only tool registrations and atomic tool behavior
    - `events.ts` only event handlers
-   - multi-turn workflow runners/state machines in focused helper modules such as `implementation-flow-runner.ts`
+   - multi-turn command-owned chain runners or event/state-machine runners in focused helper modules when they grow beyond simple command glue
+   - event compatibility/state-machine helpers may live in modules such as `implementation-flow-runner.ts`
    - pure helpers in `formatters.ts`, `spec-parser.ts`, `methodology-loader.ts`, `prompt-builders.ts`
 
-3. Prefer extension-side state machines for required multi-turn workflows:
-   - Persist state with `pi.appendEntry(...)` so it survives reloads/session history and follows branch semantics.
-   - Drive transitions from lifecycle events such as `agent_end` instead of asking the LLM to call the next tool.
-   - Use simple explicit phases such as `armed`, `running`, `done`, and `error`.
-   - Example: checkpoint review is triggered after `spec_flow_checkpoint_handoff_save` by `agent_end` and runs in a separate review subagent when enabled in `spec-flow.config.json`.
+3. Prefer command-owned chain runners for workflows that must switch models or sessions:
+   - When a workflow must sequence multiple LLM turns, change model/thinking, or cross session boundaries, run it from an `ExtensionCommandContext` command handler.
+   - Use the proven chain pattern: `pi.sendUserMessage(...)` → wait for turn start → `ctx.waitForIdle()` → inspect persisted ticket/handoff state → start the next step.
+   - Do not enqueue slash commands from `agent_end` for mandatory chaining. That pattern was unreliable for implementation → checkpoint review chaining.
+   - For checkpoint code review, the reviewer must run as a fresh third-party session: do not inherit implementation conversation context; pass only repository state, tickets, checkpoint handoff, configured review skills, model, and thinking level.
 
-3a. Checkpoint review lifecycle is strict:
+3a. Use event/state-machine runners only as compatibility or guard rails:
+   - Persist state with `pi.appendEntry(...)` so it survives reloads/session history and follows branch semantics.
+   - Drive simple local transitions from lifecycle events such as `agent_end` only when command-owned chaining is not needed.
+   - Use simple explicit phases such as `armed`, `running`, `done`, and `error`.
+   - If a command-owned chain is active, event runners must defer to the command runner and must not also start review or continuation work.
+
+3b. Checkpoint review lifecycle is strict:
    - Implement block tickets.
    - Implement and close the checkpoint ticket.
    - Save the checkpoint handoff.
    - If `checkpointReview.enabled` is true and review skills are configured, run the review with the configured model and thinking level.
-   - Show the review result to the user.
+   - Prefer the command-owned chain path: after implementation reaches idle and the checkpoint handoff exists, open a fresh review session and wait for it to finish.
+   - Show the review result in that fresh review session or in a dedicated review UI/report.
    - FIN. Stop there.
    - Do not inject the review result as an agent follow-up instruction.
    - Do not start the next ticket, do not call `/spec-flow-next`, do not modify files, and do not commit after review.

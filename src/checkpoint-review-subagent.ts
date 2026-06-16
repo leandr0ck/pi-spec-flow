@@ -72,7 +72,7 @@ function findSkillPath(skill: string, cwd: string): string | undefined {
   return undefined;
 }
 
-function loadSkillInstructions(skills: string[], cwd: string): string {
+export function loadCheckpointReviewSkillInstructions(skills: string[], cwd: string): string {
   return skills
     .map((skill) => {
       const skillPath = findSkillPath(skill, cwd);
@@ -108,7 +108,7 @@ function finalAssistantText(messages: any[]): string {
   return "";
 }
 
-function buildSystemPrompt(skillInstructions: string): string {
+export function buildCheckpointReviewSystemPrompt(skillInstructions: string): string {
   return [
     "You are a checkpoint code-review subagent running outside the main implementation conversation.",
     "Your job is to perform the configured review now, not to summarize the handoff.",
@@ -142,7 +142,7 @@ function reviewedTicketsContext(ticket: Ticket): string {
     .join("\n\n---\n\n");
 }
 
-function buildTask(ticket: Ticket, cwd: string): string {
+export function buildCheckpointReviewTask(ticket: Ticket, cwd: string): string {
   const handoff = loadCheckpointHandoff(cwd, ticket.feature_key, ticket.id);
   return [
     `Review checkpoint #${ticket.id} for feature ${ticket.feature_key}.`,
@@ -174,12 +174,12 @@ export async function runCheckpointReviewSubagent(
   ticket: Ticket,
 ): Promise<ReviewResult> {
   const reviewConfig = getCheckpointReviewConfig();
-  const skillInstructions = loadSkillInstructions(reviewConfig.skills, ctx.cwd);
-  const systemPromptPath = await writeTempPrompt(buildSystemPrompt(skillInstructions));
+  const skillInstructions = loadCheckpointReviewSkillInstructions(reviewConfig.skills, ctx.cwd);
+  const systemPromptPath = await writeTempPrompt(buildCheckpointReviewSystemPrompt(skillInstructions));
   const args = ["--mode", "json", "-p", "--no-session", "--append-system-prompt", systemPromptPath, "--tools", "read,grep,find,ls,bash"];
   if (reviewConfig.model) args.push("--model", reviewConfig.model);
   if (reviewConfig.thinkingLevel) args.push("--thinking", reviewConfig.thinkingLevel);
-  args.push(buildTask(ticket, ctx.cwd));
+  args.push(buildCheckpointReviewTask(ticket, ctx.cwd));
 
   const startedAt = Date.now();
   appendDebugLog(ctx.cwd, "checkpoint-review-subagent", "start", {

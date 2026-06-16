@@ -14,6 +14,7 @@ import { runCheckpointReviewSubagent } from "./checkpoint-review-subagent.js";
 import { appendDebugLog } from "./debug-log.js";
 
 const STATE_KEY = "spec-flow-implementation-flow";
+const COMMAND_CHAIN_KEY = "spec-flow-command-owned-chain";
 const STATUS_KEY = "spec-flow-implementation-flow";
 
 type Phase =
@@ -90,6 +91,27 @@ export function recordCheckpointHandoffSaved(
   const state = createState(ticket, "checkpointHandoffSaved", autoNext);
   persist(pi, state);
   return state;
+}
+
+export function recordCommandOwnedImplementationChain(
+  pi: ExtensionAPI,
+  ticket: Ticket,
+): void {
+  pi.appendEntry(COMMAND_CHAIN_KEY, {
+    ticketId: ticket.id,
+    featureKey: ticket.feature_key,
+    startedAt: Date.now(),
+  });
+}
+
+function hasCommandOwnedImplementationChain(ctx: {
+  sessionManager: { getBranch: () => Array<{ type: string; customType?: string; data?: any }> };
+}, ticket: Ticket): boolean {
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "custom" || entry.customType !== COMMAND_CHAIN_KEY) continue;
+    if (entry.data?.featureKey === ticket.feature_key) return true;
+  }
+  return false;
 }
 
 function markTicketInProgress(ticket: Ticket): Ticket {
@@ -281,6 +303,19 @@ export async function runImplementationFlowEvent(
       reviewSkills: reviewConfig.skills,
     });
     if (reviewConfig.enabled && reviewConfig.skills.length > 0) {
+      if (hasCommandOwnedImplementationChain(ctx, ticket)) {
+        appendDebugLog(ctx.cwd, "implementation-flow", "checkpoint-review-deferred-to-command-chain", {
+          runId: state.runId,
+          ticketId: ticket.id,
+        });
+        ctx.ui.notify(
+          `Checkpoint handoff saved for #${ticket.id}. Command-owned chain will start fresh code review next.`,
+          "info",
+        );
+        complete(state, pi);
+        return;
+      }
+
       state.phase = "reviewRunning";
       persist(pi, state);
       const startMessage = formatReviewStartMessage(ticket, reviewConfig);
