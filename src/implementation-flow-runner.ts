@@ -10,11 +10,8 @@ import { formatTicketFull } from "./formatters.js";
 import { getBlockForTicket, getNextTicketAfterBlock, getNextTicketInBlock } from "./checkpoints.js";
 import { buildCheckpointHandoffDraft } from "./checkpoint-handoffs.js";
 import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
-import {
-  armCheckpointReview,
-  loadCheckpointReviewState,
-  runCheckpointReviewEvent,
-} from "./checkpoint-review-runner.js";
+import { runCheckpointReviewSubagent } from "./checkpoint-review-subagent.js";
+import { appendDebugLog } from "./debug-log.js";
 
 const STATE_KEY = "spec-flow-implementation-flow";
 const STATUS_KEY = "spec-flow-implementation-flow";
@@ -154,15 +151,31 @@ function complete(state: ImplementationFlowState, pi: ExtensionAPI): void {
   persist(pi, state);
 }
 
+function formatReviewStartMessage(ticket: Ticket, reviewConfig: ReturnType<typeof getCheckpointReviewConfig>): string {
+  const model = reviewConfig.model ?? "Pi default model";
+  const thinking = reviewConfig.thinkingLevel ?? "Pi default thinking level";
+  return `Starting checkpoint review for #${ticket.id} using model: ${model}; thinking level: ${thinking}.`;
+}
+
 export async function runImplementationFlowEvent(
   pi: ExtensionAPI,
   ctx: any,
   event?: { messages?: any[] },
 ): Promise<void> {
   const state = loadState(ctx);
+  appendDebugLog(ctx.cwd, "implementation-flow", "event", {
+    phase: state?.phase,
+    runId: state?.runId,
+    hasPendingMessages: ctx.hasPendingMessages?.(),
+    eventMessages: event?.messages?.map((message) => message?.role),
+  });
   if (!state || state.phase === "done" || state.phase === "error") return;
 
   if (ctx.hasPendingMessages?.()) {
+    appendDebugLog(ctx.cwd, "implementation-flow", "waiting-pending-messages", {
+      phase: state.phase,
+      runId: state.runId,
+    });
     ctx.ui.setStatus(STATUS_KEY, `Implementation flow ${state.phase}; waiting for queued messages`);
     return;
   }
@@ -172,12 +185,20 @@ export async function runImplementationFlowEvent(
     state.phase = "error";
     state.lastError = `Ticket #${state.ticketId} not found.`;
     persist(pi, state);
+    appendDebugLog(ctx.cwd, "implementation-flow", "ticket-not-found", {
+      ticketId: state.ticketId,
+      runId: state.runId,
+    });
     ctx.ui.notify(state.lastError, "error");
     return;
   }
 
   if (state.phase === "ticketDone") {
     if (!state.autoNext) {
+      appendDebugLog(ctx.cwd, "implementation-flow", "auto-next-disabled", {
+        runId: state.runId,
+        ticketId: ticket.id,
+      });
       complete(state, pi);
       return;
     }
@@ -187,6 +208,11 @@ export async function runImplementationFlowEvent(
 
     if (nextInBlock && !ticket.is_checkpoint) {
       const activeNext = markTicketInProgress(nextInBlock);
+      appendDebugLog(ctx.cwd, "implementation-flow", "queue-next-ticket", {
+        runId: state.runId,
+        currentTicketId: ticket.id,
+        nextTicketId: activeNext.id,
+      });
       pi.sendUserMessage(buildSameSessionTicketMessage(activeNext), { deliverAs: "followUp" });
       ctx.ui.notify(`Queued next ticket #${activeNext.id}.`, "info");
       complete(state, pi);
@@ -194,6 +220,10 @@ export async function runImplementationFlowEvent(
     }
 
     if (ticket.is_checkpoint) {
+      appendDebugLog(ctx.cwd, "implementation-flow", "queue-checkpoint-handoff-request", {
+        runId: state.runId,
+        ticketId: ticket.id,
+      });
       pi.sendUserMessage(buildCheckpointHandoffRequest(ticket), { deliverAs: "followUp" });
       state.phase = "checkpointHandoffRequested";
       persist(pi, state);
@@ -202,11 +232,20 @@ export async function runImplementationFlowEvent(
 
     const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
     if (nextAfterBlock) {
+      appendDebugLog(ctx.cwd, "implementation-flow", "queue-next-block-command", {
+        runId: state.runId,
+        ticketId: ticket.id,
+        nextTicketId: nextAfterBlock.id,
+      });
       pi.sendUserMessage(
         `Block ended. Continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`,
         { deliverAs: "followUp" },
       );
     } else {
+      appendDebugLog(ctx.cwd, "implementation-flow", "complete-no-remaining-tickets", {
+        runId: state.runId,
+        ticketId: ticket.id,
+      });
       ctx.ui.notify("Implementation flow complete. No remaining tickets in this feature.", "info");
     }
     complete(state, pi);
@@ -214,36 +253,78 @@ export async function runImplementationFlowEvent(
   }
 
   if (state.phase === "checkpointHandoffRequested") {
+    appendDebugLog(ctx.cwd, "implementation-flow", "waiting-checkpoint-handoff", {
+      runId: state.runId,
+      ticketId: ticket.id,
+    });
     ctx.ui.setStatus(STATUS_KEY, `Waiting for checkpoint handoff #${ticket.id}`);
     return;
   }
 
   if (state.phase === "checkpointHandoffSaved") {
     if (!state.autoNext) {
+      appendDebugLog(ctx.cwd, "implementation-flow", "checkpoint-handoff-saved-auto-next-disabled", {
+        runId: state.runId,
+        ticketId: ticket.id,
+      });
       complete(state, pi);
       return;
     }
 
     const reviewConfig = getCheckpointReviewConfig();
+    appendDebugLog(ctx.cwd, "implementation-flow", "checkpoint-handoff-saved", {
+      runId: state.runId,
+      ticketId: ticket.id,
+      reviewEnabled: reviewConfig.enabled,
+      reviewModel: reviewConfig.model,
+      reviewThinking: reviewConfig.thinkingLevel,
+      reviewSkills: reviewConfig.skills,
+    });
     if (reviewConfig.enabled && reviewConfig.skills.length > 0) {
-      const armedReviewState = armCheckpointReview(pi, ctx, ticket);
-      state.phase = "reviewPending";
+      state.phase = "reviewRunning";
       persist(pi, state);
-      const reviewState = await runCheckpointReviewEvent(pi, ctx, event, armedReviewState);
-      if (reviewState?.phase === "reviewRunning") {
-        state.phase = "reviewRunning";
-        persist(pi, state);
-      }
+      const startMessage = formatReviewStartMessage(ticket, reviewConfig);
+      ctx.ui.setStatus(STATUS_KEY, startMessage);
+      ctx.ui.notify(startMessage, "info");
+      const reviewResult = await runCheckpointReviewSubagent(pi, ctx, ticket);
+      appendDebugLog(ctx.cwd, "implementation-flow", "checkpoint-review-subagent-result", {
+        runId: state.runId,
+        ok: reviewResult.ok,
+        exitCode: reviewResult.exitCode,
+        reportPath: reviewResult.reportPath,
+      });
+      const reviewMessage = [
+        `Checkpoint review completed for #${ticket.id}.`,
+        `Report: ${reviewResult.reportPath}`,
+        "",
+        "Review flow complete. The extension will not continue implementation or start the next ticket automatically.",
+        "FIN. No further action will be taken by spec-flow in this flow.",
+        "",
+        reviewResult.output.slice(0, 8000),
+        reviewResult.output.length > 8000 ? "\n\n[Review output truncated in UI; see report file for full output.]" : "",
+      ].join("\n");
+      ctx.ui.setWidget("spec-flow-checkpoint-review", reviewMessage.split("\n"));
+      ctx.ui.notify(`Checkpoint review completed for #${ticket.id}. Review the UI panel before continuing.`, "info");
+      complete(state, pi);
       return;
     }
 
     const nextAfterBlock = getNextTicketAfterBlock(listTicketsForSpec(ticket.feature_key), ticket.id);
     if (nextAfterBlock) {
+      appendDebugLog(ctx.cwd, "implementation-flow", "queue-next-block-after-checkpoint-no-review", {
+        runId: state.runId,
+        ticketId: ticket.id,
+        nextTicketId: nextAfterBlock.id,
+      });
       pi.sendUserMessage(
         `Checkpoint handoff saved. Continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`,
         { deliverAs: "followUp" },
       );
     } else {
+      appendDebugLog(ctx.cwd, "implementation-flow", "checkpoint-complete-no-remaining-tickets", {
+        runId: state.runId,
+        ticketId: ticket.id,
+      });
       ctx.ui.notify("Checkpoint handoff saved. No remaining tickets in this feature.", "info");
     }
     complete(state, pi);
@@ -251,16 +332,10 @@ export async function runImplementationFlowEvent(
   }
 
   if (state.phase === "reviewPending" || state.phase === "reviewRunning") {
-    await runCheckpointReviewEvent(pi, ctx, event);
-    const reviewState = loadCheckpointReviewState(ctx);
-    if (reviewState?.phase === "done") {
-      complete(state, pi);
-      ctx.ui.notify("Checkpoint review complete. Implementation flow is paused before the next block.", "info");
-      return;
-    }
-    if (reviewState?.phase === "reviewRunning") {
-      state.phase = "reviewRunning";
-      persist(pi, state);
-    }
+    appendDebugLog(ctx.cwd, "implementation-flow", "review-state-reentered", {
+      runId: state.runId,
+      phase: state.phase,
+    });
+    ctx.ui.setStatus(STATUS_KEY, `Checkpoint review subagent running for #${ticket.id}`);
   }
 }

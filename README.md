@@ -193,7 +193,21 @@ Because tickets live in your repo, they can be reviewed, versioned, and resumed 
 
 ## Optional checkpoint code review
 
-When `checkpointReview.enabled` is `true`, the extension adds a review gate after each checkpoint. Once the checkpoint handoff is saved, `pi-spec-flow` switches to the configured review model and thinking level, opens a fresh review session, and asks the configured skills to review the completed block before the next block continues.
+When `checkpointReview.enabled` is `true` in `spec-flow.config.json`, the extension automatically adds a review gate after each checkpoint.
+
+**Hard lifecycle requirement:**
+
+1. Implement the block tickets.
+2. Implement/close the checkpoint ticket.
+3. Save the checkpoint handoff.
+4. If checkpoint review is configured, launch the review with the configured review model and thinking level.
+5. Run the review against the completed block tickets and checkpoint handoff.
+6. Show the review result to the user.
+7. **FIN. Stop. Do not continue implementation. Do not start the next ticket. Do not run `/spec-flow-next`. Do not commit.**
+
+The checkpoint review result is user-facing output only. It must not be injected as a follow-up instruction for the implementation agent to act on.
+
+There is no separate manual review command; checkpoint review only runs from the automatic post-checkpoint flow when configured.
 
 This is useful when you want a second-pass review of the code produced in the previous block without mixing that review context into the implementation session.
 
@@ -210,17 +224,14 @@ Recommended model format:
 }
 ```
 
-Use `provider/model` for `checkpointReview.model` when possible so Pi can select the model unambiguously. When the model is selected successfully, Pi's status bar reflects the active review model.
+Use `provider/model` for `checkpointReview.model` when possible so the review subagent can select the model unambiguously. The implementation session should not continue after the review finishes.
 
-Example queued review:
+Example review behavior:
 
 ```text
-**Checkpoint Code Review** — Block ending at #5 using model claude-sonnet-4-20250514 with thinking level: high
-
-Run the following skills as a code review: `$code-reviewer`, `$senior-security`.
-Focus on these changed files: src/auth.ts, src/middleware.ts, tests/auth.test.ts.
-
-After the review, continue with the next block.
+Starting checkpoint review for #5 using model: openai-codex/gpt-5.5; thinking level: high.
+Checkpoint review completed for #5.
+Review flow complete. The extension will not continue implementation or start the next ticket automatically.
 ```
 
 ## Recommended usage pattern

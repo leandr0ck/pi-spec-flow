@@ -11,7 +11,7 @@
 │   ├── commands.ts
 │   ├── tools.ts
 │   ├── events.ts
-│   ├── checkpoint-review-runner.ts
+│   ├── checkpoint-review-subagent.ts
 │   ├── implementation-flow-runner.ts
 │   ├── ticket-validation-runner.ts
 │   ├── checkpoint-handoffs.ts
@@ -63,14 +63,24 @@
    - `commands.ts` only commands
    - `tools.ts` only tool registrations and atomic tool behavior
    - `events.ts` only event handlers
-   - multi-turn workflow runners/state machines in focused helper modules such as `checkpoint-review-runner.ts`
+   - multi-turn workflow runners/state machines in focused helper modules such as `implementation-flow-runner.ts`
    - pure helpers in `formatters.ts`, `spec-parser.ts`, `methodology-loader.ts`, `prompt-builders.ts`
 
 3. Prefer extension-side state machines for required multi-turn workflows:
    - Persist state with `pi.appendEntry(...)` so it survives reloads/session history and follows branch semantics.
    - Drive transitions from lifecycle events such as `agent_end` instead of asking the LLM to call the next tool.
    - Use simple explicit phases such as `armed`, `running`, `done`, and `error`.
-   - Example: checkpoint review is armed after `spec_flow_checkpoint_handoff_save`, started by `agent_end`, switches model/thinking in runtime code, sends the review prompt, then restores the original model/thinking after the review turn completes.
+   - Example: checkpoint review is triggered after `spec_flow_checkpoint_handoff_save` by `agent_end` and runs in a separate review subagent when enabled in `spec-flow.config.json`.
+
+3a. Checkpoint review lifecycle is strict:
+   - Implement block tickets.
+   - Implement and close the checkpoint ticket.
+   - Save the checkpoint handoff.
+   - If `checkpointReview.enabled` is true and review skills are configured, run the review with the configured model and thinking level.
+   - Show the review result to the user.
+   - FIN. Stop there.
+   - Do not inject the review result as an agent follow-up instruction.
+   - Do not start the next ticket, do not call `/spec-flow-next`, do not modify files, and do not commit after review.
 
 4. Keep custom tools atomic; avoid coordination tools when runtime can own the workflow:
    - Good custom tools: create/update tickets, validate handoffs, save checkpoint handoffs.

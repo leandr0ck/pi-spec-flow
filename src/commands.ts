@@ -13,23 +13,15 @@ import {
   listTicketsForSpec,
   getTicket,
   updateTicket,
-  getCheckpointReviewConfig,
   type Ticket,
-  type ThinkingLevel,
 } from "./tickets-fs.js";
 import { formatTicketFull } from "./formatters.js";
 import { parseSpecSections, buildSpecSummary } from "./spec-parser.js";
 import { loadMethodology } from "./methodology-loader.js";
-import { getBlockForTicket, getNextTicketAfterBlock, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
-import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
+import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "./checkpoints.js";
+import { loadPreviousCheckpointHandoff } from "./checkpoint-handoffs.js";
 import { savePlanningContext } from "./planning-context.js";
 import { compactTicketInstruction, implementationProtocolLine } from "./prompt-builders.js";
-
-export type ModelLike = {
-  provider: string;
-  id: string;
-  name?: string;
-};
 
 type SpecFlowInitArgs = {
   specArg: string;
@@ -100,78 +92,6 @@ function toStoredSpecPath(cwd: string, specPath: string): string {
     return rel;
   }
   return specPath;
-}
-
-function parseProviderModel(value: string): { provider: string; modelId: string } | null {
-  const trimmed = value.trim();
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return null;
-  return {
-    provider: trimmed.slice(0, slash),
-    modelId: trimmed.slice(slash + 1),
-  };
-}
-
-export function resolveConfiguredModel(
-  modelRegistry: { find: (provider: string, modelId: string) => ModelLike | undefined; getAll: () => ModelLike[] },
-  configuredModel: string,
-): { model?: ModelLike; warning?: string } {
-  const trimmed = configuredModel.trim();
-  if (!trimmed) return { warning: "Empty checkpointReview.model value." };
-
-  const providerModel = parseProviderModel(trimmed);
-  if (providerModel) {
-    const model = modelRegistry.find(providerModel.provider, providerModel.modelId);
-    return model
-      ? { model }
-      : { warning: `Configured review model not found: ${providerModel.provider}/${providerModel.modelId}` };
-  }
-
-  const matches = modelRegistry
-    .getAll()
-    .filter((model) => model.id === trimmed || model.name === trimmed);
-
-  if (matches.length === 1) return { model: matches[0] };
-  if (matches.length > 1) {
-    return {
-      warning: `Configured review model "${trimmed}" is ambiguous. Use provider/model, e.g. ${matches[0].provider}/${matches[0].id}.`,
-    };
-  }
-
-  return { warning: `Configured review model not found: ${trimmed}` };
-}
-
-function filesChangedFromCheckpointHandoff(cwd: string, ticket: Ticket): string[] {
-  const handoff = loadCheckpointHandoff(cwd, ticket.feature_key, ticket.id);
-  if (!handoff) return [];
-
-  const filesSection = handoff.content.match(/### Files changed\n([\s\S]*?)(?=\n### |$)/i);
-  if (!filesSection) return [];
-
-  return filesSection[1]
-    .split("\n")
-    .map((line) => line.replace(/^-\s*/, "").trim())
-    .filter((line) => line.length > 0 && !/^none recorded$/i.test(line));
-}
-
-function buildCheckpointReviewPrompt(cwd: string, ticket: Ticket): string {
-  const reviewConfig = getCheckpointReviewConfig();
-  const orderedTickets = listTicketsForSpec(ticket.feature_key);
-  const nextAfterBlock = getNextTicketAfterBlock(orderedTickets, ticket.id);
-  const filesChanged = filesChangedFromCheckpointHandoff(cwd, ticket);
-  const skillsList = reviewConfig.skills.map((skill) => `$${skill}`).join(", ");
-  const filesHint = filesChanged.length > 0
-    ? ` Focus on these changed files: ${filesChanged.join(", ")}.`
-    : "";
-  const nextHint = nextAfterBlock
-    ? ` After the review, continue with /spec-flow-next --new ${nextAfterBlock.id} --feature=${ticket.feature_key}.`
-    : " After the review, report final findings. No remaining tickets.";
-
-  return [
-    `**Checkpoint Code Review** — Block ending at #${ticket.id}`,
-    "",
-    `Run the following skills as a code review: ${skillsList}.${filesHint}${nextHint}`,
-  ].join("\n");
 }
 
 function markTicketInProgress(ticket: Ticket): Ticket {
@@ -433,96 +353,6 @@ export function registerCommands(pi: ExtensionAPI): void {
           newSessionCtx.ui.notify(
             `Opened new session for ticket #${activeTicket.id}: ${activeTicket.title}`,
             "info"
-          );
-        },
-      });
-    },
-  });
-
-  // ── /spec-flow-checkpoint-review ──────────────────────────
-
-  pi.registerCommand("spec-flow-checkpoint-review", {
-    description:
-      "Open a focused checkpoint code review session using checkpointReview config",
-    handler: async (args, ctx) => {
-      initTicketsStore(ctx.cwd);
-      if (!ticketsExist()) {
-        ctx.ui.notify("No tickets store. Run /spec-flow-init first.", "warning");
-        return;
-      }
-
-      const parsed = parseSpecFlowNextArgs(args);
-      if (parsed.ticketId == null) {
-        ctx.ui.notify("Usage: /spec-flow-checkpoint-review <checkpoint-ticket-id> [--feature <feature>]", "error");
-        return;
-      }
-
-      const ticket = getTicket(parsed.ticketId);
-      if (!ticket) {
-        ctx.ui.notify(`Ticket #${parsed.ticketId} not found.`, "error");
-        return;
-      }
-
-      const availableSpecs = Array.from(new Set(listTickets().map((t) => t.feature_key))).sort();
-      const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
-      if (parsed.feature && !resolvedFeature) {
-        ctx.ui.notify(
-          `Feature/spec not found: "${parsed.feature}". Available: ${availableSpecs.join(", ")}`,
-          "error",
-        );
-        return;
-      }
-      if (resolvedFeature && ticket.feature_key !== resolvedFeature) {
-        ctx.ui.notify(
-          `Ticket #${ticket.id} belongs to "${ticket.feature_key}", not "${resolvedFeature}".`,
-          "error",
-        );
-        return;
-      }
-
-      if (!ticket.is_checkpoint || ticket.status !== "done") {
-        ctx.ui.notify(`Ticket #${ticket.id} must be a done checkpoint before code review.`, "error");
-        return;
-      }
-
-      const reviewConfig = getCheckpointReviewConfig();
-      if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
-        ctx.ui.notify("checkpointReview is disabled or has no skills configured.", "warning");
-        return;
-      }
-
-      if (reviewConfig.model) {
-        const resolution = resolveConfiguredModel(ctx.modelRegistry, reviewConfig.model);
-        if (resolution.model) {
-          const success = await pi.setModel(resolution.model as never);
-          if (!success) {
-            ctx.ui.notify(
-              `No API key configured for review model ${resolution.model.provider}/${resolution.model.id}; continuing with current model.`,
-              "warning",
-            );
-          } else {
-            ctx.ui.notify(
-              `Review model selected: ${resolution.model.provider}/${resolution.model.id}`,
-              "info",
-            );
-          }
-        } else if (resolution.warning) {
-          ctx.ui.notify(`${resolution.warning}; continuing with current model.`, "warning");
-        }
-      }
-
-      if (reviewConfig.thinkingLevel) {
-        pi.setThinkingLevel(reviewConfig.thinkingLevel as ThinkingLevel);
-      }
-
-      const reviewPrompt = buildCheckpointReviewPrompt(ctx.cwd, ticket);
-      await ctx.newSession({
-        parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
-        withSession: async (newSessionCtx) => {
-          await newSessionCtx.sendUserMessage(reviewPrompt);
-          newSessionCtx.ui.notify(
-            `Opened checkpoint code review for #${ticket.id}.`,
-            "info",
           );
         },
       });
