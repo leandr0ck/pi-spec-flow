@@ -179,7 +179,7 @@ export async function runCheckpointReviewSubagent(
   const args = ["--mode", "json", "-p", "--no-session", "--append-system-prompt", systemPromptPath, "--tools", "read,grep,find,ls,bash"];
   if (reviewConfig.model) args.push("--model", reviewConfig.model);
   if (reviewConfig.thinkingLevel) args.push("--thinking", reviewConfig.thinkingLevel);
-  args.push(buildCheckpointReviewTask(ticket, ctx.cwd));
+  const reviewTask = buildCheckpointReviewTask(ticket, ctx.cwd);
 
   const startedAt = Date.now();
   appendDebugLog(ctx.cwd, "checkpoint-review-subagent", "start", {
@@ -189,6 +189,8 @@ export async function runCheckpointReviewSubagent(
     thinking: reviewConfig.thinkingLevel,
     skills: reviewConfig.skills,
     args: args.filter((arg) => arg !== systemPromptPath),
+    promptDelivery: "stdin",
+    promptLength: reviewTask.length,
   });
 
   const messages: any[] = [];
@@ -197,11 +199,18 @@ export async function runCheckpointReviewSubagent(
   const invocation = getPiInvocation(args);
 
   const exitCode = await new Promise<number>((resolveExit) => {
-    const proc = spawn(invocation.command, invocation.args, {
-      cwd: ctx.cwd,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn(invocation.command, invocation.args, {
+        cwd: ctx.cwd,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      stderr += error instanceof Error ? error.message : String(error);
+      resolveExit(1);
+      return;
+    }
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
@@ -214,16 +223,22 @@ export async function runCheckpointReviewSubagent(
       }
     };
 
-    proc.stdout.on("data", (data) => {
+    proc.stdout?.on("data", (data) => {
       buffer += data.toString();
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) processLine(line);
     });
 
-    proc.stderr.on("data", (data) => {
+    proc.stderr?.on("data", (data) => {
       stderr += data.toString();
     });
+
+    proc.stdin?.on("error", (error) => {
+      stderr += `\nstdin error: ${error.message}`;
+    });
+
+    proc.stdin?.end(reviewTask, "utf8");
 
     proc.on("close", (code) => {
       if (buffer.trim()) processLine(buffer);
