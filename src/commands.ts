@@ -250,120 +250,7 @@ export function registerCommands(pi: ExtensionAPI): void {
     description:
       "Show next pending (or ID), optionally scoped by --feature; use --new for fresh session",
     handler: async (args, ctx) => {
-      initTicketsStore(ctx.cwd);
-      if (!ticketsExist()) {
-        ctx.ui.notify(
-          "No tickets store. Run /spec-flow-init first.",
-          "warning"
-        );
-        return;
-      }
-
-      const parsed = parseSpecFlowNextArgs(args);
-      let ticket: Ticket | undefined;
-      const all = listTickets();
-      const availableSpecs = Array.from(new Set(all.map((t) => t.feature_key))).sort();
-      const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
-
-      if (parsed.feature && !resolvedFeature) {
-        ctx.ui.notify(
-          `Feature/spec not found: "${parsed.feature}". Available: ${availableSpecs.join(", ")}`,
-          "error"
-        );
-        return;
-      }
-
-      if (parsed.ticketId != null) {
-        const byId = getTicket(parsed.ticketId);
-        if (!byId) {
-          ctx.ui.notify(`Ticket #${parsed.ticketId} not found.`, "error");
-          return;
-        }
-        if (resolvedFeature && byId.feature_key !== resolvedFeature) {
-          ctx.ui.notify(
-            `Ticket #${byId.id} belongs to "${byId.feature_key}", not "${resolvedFeature}".`,
-            "error"
-          );
-          return;
-        }
-        ticket = byId;
-      } else {
-        const pending = resolvedFeature
-          ? listTicketsForSpec(resolvedFeature, "pending")
-          : listTickets("pending");
-        if (pending.length === 0) {
-          const inProgress = resolvedFeature
-            ? listTicketsForSpec(resolvedFeature, "in_progress")
-            : listTickets("in_progress");
-          if (inProgress.length > 0) {
-            ctx.ui.notify(
-              `${inProgress.length} ticket(s) in progress, none pending.`,
-              "info"
-            );
-          } else {
-            ctx.ui.notify("All tickets done!", "info");
-          }
-          return;
-        }
-        ticket = pending[0];
-      }
-
-      if (!ticket) {
-        ctx.ui.notify("No ticket found.", "warning");
-        return;
-      }
-
-      const orderedTickets = listTicketsForSpec(ticket.feature_key);
-      const previousHandoff = isFirstTicketOfBlock(orderedTickets, ticket.id)
-        ? loadPreviousCheckpointHandoff(ctx.cwd, orderedTickets, ticket.id)?.content ?? null
-        : null;
-      const previousCheckpoint = isFirstTicketOfBlock(orderedTickets, ticket.id)
-        ? getPreviousCheckpointTicket(orderedTickets, ticket.id) ?? null
-        : null;
-
-      if (previousCheckpoint && !previousHandoff) {
-        ctx.ui.notify(
-          `Checkpoint handoff for #${previousCheckpoint.id} is missing. Complete that summary before opening the next block.`,
-          "warning"
-        );
-        return;
-      }
-
-      const activeTicket = markTicketInProgress(ticket);
-      const activeOrderedTickets = listTicketsForSpec(activeTicket.feature_key);
-
-      if (!parsed.openInNewSession) {
-        pi.sendUserMessage(
-          previousHandoff
-            ? [
-                implementationProtocolLine(),
-                "",
-                "Read this synthesized handoff from the previous checkpoint first:",
-                "",
-                previousHandoff,
-                "",
-                `## Current ticket #${activeTicket.id}`,
-                formatTicketFull(activeTicket),
-                "",
-                compactTicketInstruction(activeTicket),
-              ].join("\n")
-            : buildTicketKickoffMessage(activeTicket)
-        );
-        ctx.ui.notify(`Sent ticket #${activeTicket.id}: ${activeTicket.title}`, "info");
-        return;
-      }
-
-      const kickoff = buildBlockKickoffMessage(activeTicket, activeOrderedTickets, previousHandoff);
-      await ctx.newSession({
-        parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
-        withSession: async (newSessionCtx) => {
-          await newSessionCtx.sendUserMessage(kickoff);
-          newSessionCtx.ui.notify(
-            `Opened new session for ticket #${activeTicket.id}: ${activeTicket.title}`,
-            "info"
-          );
-        },
-      });
+      await startImplementationByTicket(pi, args, ctx);
     },
   });
 
@@ -855,43 +742,57 @@ async function startImplementationByTicket(
     total: scoped.length,
   });
 
-  recordCommandOwnedImplementationChain(pi, activeTicket);
-  ctx.ui.notify(
-    `Implementation chain started on ticket #${activeTicket.id}: ${activeTicket.title}`,
-    "info",
-  );
-  pi.sendUserMessage(kickoff);
-  await waitForTurnStart(ctx);
-  await ctx.waitForIdle();
-  await waitForQueuedTurnsToDrain(ctx);
-
-  if (!checkpointTicket) {
-    ctx.ui.notify("Implementation chain reached idle; no checkpoint ticket was found for this block.", "info");
-    return;
-  }
-
-  const completedCheckpoint = getTicket(checkpointTicket.id);
-  const savedHandoff = completedCheckpoint
-    ? loadCheckpointHandoff(ctx.cwd, completedCheckpoint.feature_key, completedCheckpoint.id)
-    : null;
-
-  if (!completedCheckpoint || completedCheckpoint.status !== "done" || !savedHandoff) {
-    ctx.ui.notify(
-      `Implementation chain reached idle before checkpoint #${checkpointTicket.id} was fully closed and handed off. No review started.`,
-      "warning",
+  // Helper function to run implementation + review in a session context
+  const runImplementationAndReview = async (sessionCtx: ExtensionCommandContext) => {
+    recordCommandOwnedImplementationChain(pi, activeTicket);
+    sessionCtx.ui.notify(
+      `Implementation chain started on ticket #${activeTicket.id}: ${activeTicket.title}`,
+      "info",
     );
-    return;
-  }
+    pi.sendUserMessage(kickoff);
+    await waitForTurnStart(sessionCtx);
+    await sessionCtx.waitForIdle();
+    await waitForQueuedTurnsToDrain(sessionCtx);
 
-  const reviewConfig = getCheckpointReviewConfig();
-  if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
-    ctx.ui.notify(`Checkpoint #${completedCheckpoint.id} complete. Review is disabled; chain stops here.`, "info");
-    return;
-  }
+    if (!checkpointTicket) {
+      sessionCtx.ui.notify("Implementation chain reached idle; no checkpoint ticket was found for this block.", "info");
+      return;
+    }
 
-  await startFreshCheckpointReviewSession(
-    pi,
-    `${completedCheckpoint.id} --feature=${completedCheckpoint.feature_key}`,
-    ctx,
-  );
+    const completedCheckpoint = getTicket(checkpointTicket.id);
+    const savedHandoff = completedCheckpoint
+      ? loadCheckpointHandoff(sessionCtx.cwd, completedCheckpoint.feature_key, completedCheckpoint.id)
+      : null;
+
+    if (!completedCheckpoint || completedCheckpoint.status !== "done" || !savedHandoff) {
+      sessionCtx.ui.notify(
+        `Implementation chain reached idle before checkpoint #${checkpointTicket.id} was fully closed and handed off. No review started.`,
+        "warning",
+      );
+      return;
+    }
+
+    const reviewConfig = getCheckpointReviewConfig();
+    if (!reviewConfig.enabled || reviewConfig.skills.length === 0) {
+      sessionCtx.ui.notify(`Checkpoint #${completedCheckpoint.id} complete. Review is disabled; chain stops here.`, "info");
+      return;
+    }
+
+    await startFreshCheckpointReviewSession(
+      pi,
+      `${completedCheckpoint.id} --feature=${completedCheckpoint.feature_key}`,
+      sessionCtx,
+    );
+  };
+
+  if (parsed.openInNewSession) {
+    await ctx.newSession({
+      parentSession: ctx.sessionManager.getSessionFile() ?? undefined,
+      withSession: async (newSessionCtx) => {
+        await runImplementationAndReview(newSessionCtx);
+      },
+    });
+  } else {
+    await runImplementationAndReview(ctx);
+  }
 }
