@@ -91,6 +91,10 @@ Run:
 
 The extension starts the next implementation block and keeps the session focused on the relevant work. At checkpoint boundaries, it saves a concise handoff so the next block does not need the full prior chat history.
 
+**Feature scoping:** When you pass `--feature`, the command validates and selects tickets only from that feature. Incomplete tickets in other features are ignored. This lets you start working on one feature without fixing unrelated tickets first.
+
+If you omit `--feature` and multiple features exist, the command asks you to choose one.
+
 ### 4. Review checkpoints when configured
 
 If checkpoint review is enabled, `pi-spec-flow` automatically starts a fresh review session after a checkpoint handoff is saved.
@@ -133,7 +137,7 @@ Use `provider/model` for `checkpointReview.model` when you want precise model se
 | Command | Description |
 |---------|-------------|
 | `/spec-flow-init <spec.md> [--feature <key>]` | Create an implementation plan from a spec |
-| `/spec-flow-implement [--feature <key>]` | Start or continue implementation until the next checkpoint |
+| `/spec-flow-implement [--feature <key>]` | Start or continue implementation. When `--feature` is provided, only tickets in that feature are validated and considered — tickets in other features are ignored. |
 | `/spec-flow-start [--feature <key>]` | Alias for `/spec-flow-implement` |
 | `/spec-flow-next` | Open the next planned item in the current session |
 | `/spec-flow-next --new` | Open the next planned item in a fresh session |
