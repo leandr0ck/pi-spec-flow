@@ -610,13 +610,30 @@ async function startImplementationByTicket(
     return;
   }
 
+  const parsed = parseSpecFlowNextArgs(args);
   const all = listTickets();
   if (all.length === 0) {
     ctx.ui.notify("No tickets found.", "info");
     return;
   }
 
-  const requiredIssues = all.filter(
+  // Resolve feature early so we can scope validation
+  const availableSpecs = Array.from(new Set(all.map((t) => t.feature_key))).sort();
+  const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
+
+  if (parsed.feature && !resolvedFeature) {
+    ctx.ui.notify(
+      `Feature/spec not found: "${parsed.feature}". Available: ${availableSpecs.join(", ")}`,
+      "error"
+    );
+    return;
+  }
+
+  // When --feature is specified, only validate tickets for that feature
+  const ticketsToValidate = resolvedFeature
+    ? listTicketsForSpec(resolvedFeature)
+    : all;
+  const requiredIssues = ticketsToValidate.filter(
     (t) => !t.acceptance_criteria || !t.verification || !t.estimated_scope || !t.phase
   );
 
@@ -638,19 +655,7 @@ async function startImplementationByTicket(
     return;
   }
 
-  const parsed = parseSpecFlowNextArgs(args);
   let ticket: Ticket | undefined;
-  const availableSpecs = Array.from(new Set(all.map((t) => t.feature_key))).sort();
-
-  const resolvedFeature = resolveFeatureSpec(parsed.feature, availableSpecs);
-
-  if (parsed.feature && !resolvedFeature) {
-    ctx.ui.notify(
-      `Feature/spec not found: "${parsed.feature}". Available: ${availableSpecs.join(", ")}`,
-      "error"
-    );
-    return;
-  }
 
   if (parsed.ticketId != null) {
     ticket = getTicket(parsed.ticketId) || undefined;
