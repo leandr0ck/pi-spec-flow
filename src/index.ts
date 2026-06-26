@@ -23,7 +23,7 @@
  *   spec_flow_handoff_loop_done — Validate handoff and close ticket safely
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerCommands } from "./commands.js";
+import { registerCommands } from "./commands/index.js";
 import { registerTools } from "./tools.js";
 import { registerEvents } from "./events.js";
 import { registerCompactBuiltinToolRenderers } from "./builtin-tool-renderers.js";

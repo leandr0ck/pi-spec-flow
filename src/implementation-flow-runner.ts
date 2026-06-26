@@ -104,6 +104,17 @@ export function recordCommandOwnedImplementationChain(
   });
 }
 
+export function appendCommandOwnedImplementationChainToSession(
+  sessionManager: { appendCustomEntry: (customType: string, data?: unknown) => unknown },
+  ticket: Ticket,
+): void {
+  sessionManager.appendCustomEntry(COMMAND_CHAIN_KEY, {
+    ticketId: ticket.id,
+    featureKey: ticket.feature_key,
+    startedAt: Date.now(),
+  });
+}
+
 function hasCommandOwnedImplementationChain(ctx: {
   sessionManager: { getBranch: () => Array<{ type: string; customType?: string; data?: any }> };
 }, ticket: Ticket): boolean {
