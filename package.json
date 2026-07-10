@@ -1,6 +1,6 @@
 {
   "name": "pi-spec-flow",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Pi extension that turns a technical spec into structured implementation tickets stored as Markdown files.",
   "type": "module",
   "main": "./src/index.ts",
