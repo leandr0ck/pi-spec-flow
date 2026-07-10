@@ -30,10 +30,23 @@ Restart Pi after installing.
 
 ## Quick start
 
+Recommended setup: keep each spec and its tickets together.
+
+Create `spec-flow.config.json` in your project root:
+
+```json
+{
+  "ticketsFolder": "./tickets",
+  "ticketsFolderBase": "spec"
+}
+```
+
+Then use the spec path as the main handle for the whole workflow:
+
 ```text
 1. Write a spec:  docs/my-feature-spec.md
-2. Plan work:     /spec-flow-init docs/my-feature-spec.md --feature=my-feature
-3. Implement:     /spec-flow-implement --feature=my-feature
+2. Plan work:     /spec-flow-init docs/my-feature-spec.md
+3. Implement:     /spec-flow-implement docs/my-feature-spec.md
 ```
 
 Typical flow:
@@ -68,16 +81,24 @@ Example:
 Run:
 
 ```text
-/spec-flow-init <spec.md> --feature=<feature-key>
+/spec-flow-init <spec.md>
 ```
 
 Example:
 
 ```text
-/spec-flow-init docs/checkout-spec.md --feature=checkout
+/spec-flow-init docs/checkout-spec.md
 ```
 
 Pi will read the spec and create a structured implementation plan stored in your repo as Markdown.
+
+With the recommended config, tickets are written beside the spec:
+
+```text
+docs/tickets/
+```
+
+No feature folder is required. The spec path scopes where the tickets live.
 
 The extension validates the plan as it is created so implementation starts from clear, testable work instead of a vague backlog.
 
@@ -86,14 +107,20 @@ The extension validates the plan as it is created so implementation starts from 
 Run:
 
 ```text
-/spec-flow-implement --feature=<feature-key>
+/spec-flow-implement <spec.md>
+```
+
+Example:
+
+```text
+/spec-flow-implement docs/checkout-spec.md
 ```
 
 The extension starts the next implementation block and keeps the session focused on the relevant work. At checkpoint boundaries, it saves a concise handoff so the next block does not need the full prior chat history.
 
-**Feature scoping:** When you pass `--feature`, the command validates and selects tickets only from that feature. Incomplete tickets in other features are ignored. This lets you start working on one feature without fixing unrelated tickets first.
+The spec path tells spec-flow exactly which ticket folder to use. This is the preferred flow for end users.
 
-If you omit `--feature` and multiple features exist, the command asks you to choose one.
+`--feature` is still supported for older/global ticket-folder setups, but you usually do not need it when tickets live beside the spec.
 
 ### 4. Review checkpoints when configured
 
@@ -105,12 +132,25 @@ After review, the flow stops. You decide what to do next.
 
 ## Configuration
 
-Create `spec-flow.config.json` in your project root:
+Recommended `spec-flow.config.json`:
 
 ```json
 {
-  "$schema": "./spec-flow.schema.json",
-  "ticketsFolder": "./docs/features",
+  "ticketsFolder": "./tickets",
+  "ticketsFolderBase": "spec",
+  "checkpointReview": {
+    "enabled": false,
+    "skills": []
+  }
+}
+```
+
+Full example with checkpoint review enabled:
+
+```json
+{
+  "ticketsFolder": "./tickets",
+  "ticketsFolderBase": "spec",
   "checkpointReview": {
     "enabled": true,
     "model": "openai-codex/gpt-5.5",
@@ -124,7 +164,8 @@ Create `spec-flow.config.json` in your project root:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `ticketsFolder` | `./docs/features` | Where generated plan files are stored |
+| `ticketsFolder` | `./docs/features` | Relative or absolute folder where generated plan files are stored. Recommended: `./tickets` |
+| `ticketsFolderBase` | `cwd` | Base used to resolve relative `ticketsFolder` values: `spec` for the directory containing the spec, or `cwd` for the project root. Recommended: `spec` |
 | `checkpointReview.enabled` | `false` | Whether to run checkpoint reviews |
 | `checkpointReview.model` | current model | Model used for checkpoint review |
 | `checkpointReview.thinkingLevel` | `medium` | Thinking level used for checkpoint review |
@@ -132,11 +173,91 @@ Create `spec-flow.config.json` in your project root:
 
 Use `provider/model` for `checkpointReview.model` when you want precise model selection.
 
+### Recommended: store tickets beside the spec file
+
+With:
+
+```json
+{
+  "ticketsFolder": "./tickets",
+  "ticketsFolderBase": "spec"
+}
+```
+
+this command:
+
+```bash
+/spec-flow-init docs/specs/payments.md
+```
+
+creates tickets under:
+
+```text
+docs/specs/tickets/
+```
+
+In `spec` mode, spec-flow does **not** create an extra `{feature-key}` subfolder. The spec file already scopes the ticket folder location, so ticket Markdown files are written directly into `tickets/`.
+
+To implement that ticket set, pass the same spec path:
+
+```bash
+/spec-flow-implement docs/specs/payments.md
+```
+
+or for a single-ticket kickoff:
+
+```bash
+/spec-flow-next docs/specs/payments.md
+```
+
+When `ticketsFolderBase` is `spec`, `--feature` is optional without an interactive confirmation. If omitted, spec-flow derives the feature key from the spec title or filename.
+
+You can also use command flags for one-off runs without changing `spec-flow.config.json`:
+
+```bash
+/spec-flow-init docs/specs/payments.md --tickets-next-to-spec
+```
+
+Equivalent explicit form:
+
+```bash
+/spec-flow-init docs/specs/payments.md --tickets-folder-base spec --tickets-folder ./tickets
+```
+
+### Legacy/global ticket folder mode
+
+If you prefer one global ticket folder for the whole repository, use:
+
+```json
+{
+  "ticketsFolder": "./docs/features",
+  "ticketsFolderBase": "cwd"
+}
+```
+
+In this mode, tickets are stored under:
+
+```text
+docs/features/{feature-key}/
+```
+
+and it is useful to pass a feature key:
+
+```bash
+/spec-flow-init docs/specs/payments.md --feature payments
+/spec-flow-implement --feature payments
+```
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/spec-flow-init <spec.md> [--feature <key>]` | Create an implementation plan from a spec |
+| `/spec-flow-init <spec.md>` | Create an implementation plan from a spec using the recommended spec-local ticket folder |
+| `/spec-flow-implement <spec.md>` | Start or continue implementation for tickets stored next to that spec |
+| `/spec-flow-next <spec.md>` | Open the next planned item for tickets stored next to that spec |
+| `/spec-flow-init <spec.md> [--feature <key>]` | Create an implementation plan with an explicit feature key, mainly for legacy/global folder mode |
+| `/spec-flow-init <spec.md> --tickets-next-to-spec` | Create tickets under `./tickets` beside the spec file, useful for one-off command-line/tool execution without editing config |
+| `/spec-flow-init <spec.md> --tickets-folder-base spec --tickets-folder ./tickets` | Explicitly override ticket folder placement for this feature |
 | `/spec-flow-implement [--feature <key>]` | Start or continue implementation. When `--feature` is provided, only tickets in that feature are validated and considered — tickets in other features are ignored. |
 | `/spec-flow-start [--feature <key>]` | Alias for `/spec-flow-implement` |
 | `/spec-flow-next` | Open the next planned item in the current session |
@@ -146,13 +267,27 @@ Use `provider/model` for `checkpointReview.model` when you want precise model se
 
 ## Where files are stored
 
-Generated plan files are stored under:
+With the recommended config, generated plan files are stored under:
+
+```text
+{spec-directory}/tickets/
+```
+
+Example:
+
+```text
+docs/specs/payments.md
+docs/specs/tickets/001-first-ticket.md
+docs/specs/tickets/002-second-ticket.md
+```
+
+In legacy/global folder mode, generated plan files are stored under:
 
 ```text
 {ticketsFolder}/{feature-key}/
 ```
 
-Default:
+Built-in fallback default if no config is present:
 
 ```text
 ./docs/features

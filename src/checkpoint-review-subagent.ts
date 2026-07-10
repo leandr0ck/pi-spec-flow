@@ -77,7 +77,7 @@ export function loadCheckpointReviewSkillInstructions(skills: string[], cwd: str
     .map((skill) => {
       const skillPath = findSkillPath(skill, cwd);
       if (!skillPath) return `## Skill: ${skill}\n\nSkill file not found. Perform a strict code review anyway.`;
-      return `## Skill: ${skill}\nPath: ${skillPath}\n\n${readFileSync(skillPath, "utf8").trim()}`;
+      return `## Skill: ${skill}\n\n${readFileSync(skillPath, "utf8").trim()}`;
     })
     .join("\n\n---\n\n");
 }
@@ -114,6 +114,7 @@ export function buildCheckpointReviewSystemPrompt(skillInstructions: string): st
     "Your job is to perform the configured review now, not to summarize the handoff.",
     "Use read-only inspection. Do not modify files.",
     "If you use bash, only run read-only commands such as git diff, git status, sed, rg, cat, npm test/typecheck when safe.",
+    "Configured review skill instructions are already embedded in this prompt. Do not search for or open SKILL.md files.",
     "Be concrete: cite files and line numbers where possible.",
     "",
     "Output format:",
@@ -136,9 +137,21 @@ export function buildCheckpointReviewSystemPrompt(skillInstructions: string): st
 function reviewedTicketsContext(ticket: Ticket): string {
   const orderedTickets = listTicketsForSpec(ticket.feature_key);
   const block = getBlockForTicket(orderedTickets, ticket.id);
-  const tickets = block?.tickets ?? [ticket];
-  return tickets
-    .map((reviewedTicket) => `## Ticket #${reviewedTicket.id}\n\n${formatTicketFull(reviewedTicket)}`)
+  const completedTickets = (block?.tickets ?? [ticket]).filter(
+    (reviewedTicket) => !reviewedTicket.is_checkpoint && reviewedTicket.id < ticket.id,
+  );
+
+  const sections: string[] = [];
+  sections.push(
+    completedTickets.length > 0
+      ? completedTickets
+        .map((reviewedTicket) => `## Completed Ticket #${reviewedTicket.id}\n\n${formatTicketFull(reviewedTicket)}`)
+        .join("\n\n---\n\n")
+      : "No completed implementation tickets found before this checkpoint in the current block.",
+  );
+  sections.push(`## Checkpoint Ticket #${ticket.id}\n\n${formatTicketFull(ticket)}`);
+
+  return sections
     .join("\n\n---\n\n");
 }
 
@@ -148,10 +161,10 @@ export function buildCheckpointReviewTask(ticket: Ticket, cwd: string): string {
     `Review checkpoint #${ticket.id} for feature ${ticket.feature_key}.`,
     "",
     "Inspect the current repository state and the checkpoint handoff below.",
-    "Focus on correctness, regressions, maintainability, security, whether verification is sufficient, and whether the code matches the tickets in the completed block.",
+    "Focus on correctness, regressions, maintainability, security, whether verification is sufficient, and whether the code matches the completed implementation tickets immediately before this checkpoint.",
     "End after the review. Do not start the next ticket, do not modify files, do not commit, and do not include a next-ticket command.",
     "",
-    "## Tickets to Consider",
+    "## Completed Tickets Under Review",
     "",
     reviewedTicketsContext(ticket),
     "",

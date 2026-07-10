@@ -3,6 +3,8 @@
  * — start implementation block-by-block until each checkpoint.
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   initTicketsStore,
   ticketsExist,
@@ -15,6 +17,7 @@ import {
 import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "../checkpoints.js";
 import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "../checkpoint-handoffs.js";
 import { buildTicketKickoffMessage, buildBlockKickoffMessage } from "../prompt-builders.js";
+import { loadPlanningContext, loadPlanningContextBySpecPath } from "../planning-context.js";
 import {
   appendCommandOwnedImplementationChainToSession,
   recordCommandOwnedImplementationChain,
@@ -24,6 +27,7 @@ import {
   markTicketInProgress,
   resolveFeatureSpec,
   sendUserMessageAndWait,
+  toStoredSpecPath,
 } from "./command-helpers.js";
 import { startFreshCheckpointReviewSession } from "./checkpoint-review-command.js";
 
@@ -32,7 +36,7 @@ export function registerNextCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("spec-flow-next", {
     description:
-      "Show next pending (or ID), optionally scoped by --feature; use --new for fresh session",
+      "Show next pending (or ID), optionally scoped by spec path or --feature; use --new for fresh session",
     handler: async (args, ctx) => {
       await startImplementationByTicket(pi, args, ctx);
     },
@@ -42,7 +46,7 @@ export function registerNextCommand(pi: ExtensionAPI): void {
 
   pi.registerCommand("spec-flow-implement", {
     description:
-      "Start implementation block-by-block until each checkpoint (select feature if multiple, or pass --feature)",
+      "Start implementation block-by-block until each checkpoint (pass a spec path in spec-local ticket mode)",
     handler: async (args, ctx) => {
       await startImplementationByTicket(pi, args, ctx);
     },
@@ -79,13 +83,29 @@ async function startImplementationByTicket(
   args: string | undefined,
   ctx: ExtensionCommandContext
 ): Promise<void> {
-  initTicketsStore(ctx.cwd);
+  const parsed = parseSpecFlowNextArgs(args);
+  let requestedSpecPath: string | null = null;
+  if (parsed.specPath) {
+    const absoluteSpecPath = resolve(ctx.cwd, parsed.specPath);
+    if (!existsSync(absoluteSpecPath)) {
+      ctx.ui.notify(`Spec file not found: ${absoluteSpecPath}`, "error");
+      return;
+    }
+    requestedSpecPath = toStoredSpecPath(ctx.cwd, absoluteSpecPath);
+  }
+
+  const featureContext = parsed.feature ? loadPlanningContext(ctx.cwd, parsed.feature) : null;
+  const specContext = requestedSpecPath ? loadPlanningContextBySpecPath(ctx.cwd, requestedSpecPath) : null;
+  initTicketsStore(ctx.cwd, {
+    sourceSpecPath: requestedSpecPath ?? featureContext?.sourceSpecPath ?? null,
+    ticketsFolder: specContext?.ticketsFolder ?? featureContext?.ticketsFolder ?? null,
+    ticketsFolderBase: specContext?.ticketsFolderBase ?? featureContext?.ticketsFolderBase ?? null,
+  });
   if (!ticketsExist()) {
     ctx.ui.notify("No tickets store. Run /spec-flow-init first.", "warning");
     return;
   }
 
-  const parsed = parseSpecFlowNextArgs(args);
   const all = listTickets();
   if (all.length === 0) {
     ctx.ui.notify("No tickets found.", "info");

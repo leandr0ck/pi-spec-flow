@@ -5,7 +5,22 @@ import { getBlockForTicket } from "./checkpoints.js";
 export const IMPLEMENTATION_PROTOCOL_SKILL = "spec-flow-implementation-protocol";
 
 export function implementationProtocolLine(): string {
-  return `Follow the ${IMPLEMENTATION_PROTOCOL_SKILL} skill.`;
+  return [
+    `Follow the embedded ${IMPLEMENTATION_PROTOCOL_SKILL} protocol below. Do not search the filesystem for this skill file.`,
+    "",
+    "Protocol:",
+    "1. Implement only the current ticket scope and explicit dependencies.",
+    "2. Verify using the ticket's verification steps.",
+    "3. Fill handoff fields with spec_flow_update:",
+    "   - handoff_summary: 3–5 bullets on what changed",
+    "   - handoff_files: files actually changed",
+    "   - handoff_decisions: key decisions and rationale",
+    "   - handoff_verification: commands/tests/manual checks and result",
+    "   - handoff_risks: pending risks/TODOs or None",
+    "   - handoff_next_ticket: recommended next ticket or None",
+    "4. Close with spec_flow_handoff_loop_done using the current ticket ID and feature key.",
+    "5. If this is a checkpoint ticket and the extension requests it, call spec_flow_checkpoint_handoff_save next.",
+  ].join("\n");
 }
 
 export function ticketCloseCommand(ticket: Ticket): string {

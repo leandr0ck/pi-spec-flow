@@ -10,6 +10,8 @@ const STATE_FILE = "planning-context.json";
 export interface PlanningContextEntry {
   featureKey: string;
   sourceSpecPath: string;
+  ticketsFolder?: string;
+  ticketsFolderBase?: "cwd" | "spec";
   updatedAt: string;
 }
 
@@ -51,11 +53,14 @@ export function savePlanningContext(
   cwd: string,
   featureKey: string,
   sourceSpecPath: string,
+  options?: { ticketsFolder?: string | null; ticketsFolderBase?: "cwd" | "spec" | null },
 ): void {
   const state = loadState(cwd);
   state.entries[featureKey] = {
     featureKey,
     sourceSpecPath,
+    ...(options?.ticketsFolder ? { ticketsFolder: options.ticketsFolder } : {}),
+    ...(options?.ticketsFolderBase ? { ticketsFolderBase: options.ticketsFolderBase } : {}),
     updatedAt: new Date().toISOString(),
   };
   saveState(cwd, state);
@@ -67,4 +72,21 @@ export function loadPlanningContext(
 ): PlanningContextEntry | null {
   const state = loadState(cwd);
   return state.entries[featureKey] ?? null;
+}
+
+export function loadPlanningContextBySpecPath(
+  cwd: string,
+  sourceSpecPath: string,
+): PlanningContextEntry | null {
+  const state = loadState(cwd);
+  const entries = Object.values(state.entries);
+  return entries.find((entry) => entry.sourceSpecPath === sourceSpecPath) ?? null;
+}
+
+export function loadLatestPlanningContext(cwd: string): PlanningContextEntry | null {
+  const state = loadState(cwd);
+  const entries = Object.values(state.entries);
+  if (entries.length === 0) return null;
+
+  return entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
 }

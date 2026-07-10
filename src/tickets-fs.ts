@@ -11,6 +11,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { resolve, dirname, basename, extname, join } from "node:path";
+import { loadLatestPlanningContext } from "./planning-context.js";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -31,7 +32,14 @@ export interface CheckpointReviewConfig {
 
 export interface SpecFlowConfig {
   ticketsFolder: string;
+  ticketsFolderBase: "cwd" | "spec";
   checkpointReview: CheckpointReviewConfig;
+}
+
+export interface InitTicketsStoreOptions {
+  sourceSpecPath?: string | null;
+  ticketsFolder?: string | null;
+  ticketsFolderBase?: "cwd" | "spec" | null;
 }
 
 // ── Types (mirrors db.ts for drop-in replacement) ───────────
@@ -118,6 +126,7 @@ export interface UpdateTicketInput {
 // ── Internal state ──────────────────────────────────────────
 
 let _ticketsFolder: string = "";
+let _useFeatureFolders = true;
 let _checkpointReviewConfig: CheckpointReviewConfig = { enabled: false, skills: [] };
 
 // ── Config loading ───────────────────────────────────────────
@@ -126,6 +135,7 @@ function loadConfig(cwd: string): SpecFlowConfig {
   const configPath = resolve(cwd, CONFIG_FILE);
   const defaults: SpecFlowConfig = {
     ticketsFolder: DEFAULT_TICKETS_FOLDER,
+    ticketsFolderBase: "cwd",
     checkpointReview: { enabled: false, skills: [] },
   };
   try {
@@ -133,6 +143,9 @@ function loadConfig(cwd: string): SpecFlowConfig {
     const config = JSON.parse(raw);
     if (config.ticketsFolder && typeof config.ticketsFolder === "string") {
       defaults.ticketsFolder = config.ticketsFolder;
+    }
+    if (config.ticketsFolderBase === "spec" || config.ticketsFolderBase === "cwd") {
+      defaults.ticketsFolderBase = config.ticketsFolderBase;
     }
     if (config.checkpointReview && typeof config.checkpointReview === "object") {
       const cr = config.checkpointReview;
@@ -148,6 +161,35 @@ function loadConfig(cwd: string): SpecFlowConfig {
     // File missing or invalid — use defaults
   }
   return defaults;
+}
+
+export function getSpecFlowConfig(cwd: string): SpecFlowConfig {
+  return loadConfig(cwd);
+}
+
+function resolveSourceSpecPath(cwd: string, sourceSpecPath: string): string {
+  return resolve(cwd, sourceSpecPath);
+}
+
+function resolveTicketsFolder(cwd: string, config: SpecFlowConfig, sourceSpecPath?: string | null): string {
+  if (config.ticketsFolderBase !== "spec") {
+    return resolve(cwd, config.ticketsFolder);
+  }
+
+  const contextSourceSpecPath = sourceSpecPath ?? loadLatestPlanningContext(cwd)?.sourceSpecPath;
+  if (!contextSourceSpecPath) {
+    return resolve(cwd, config.ticketsFolder);
+  }
+
+  return resolve(dirname(resolveSourceSpecPath(cwd, contextSourceSpecPath)), config.ticketsFolder);
+}
+
+function applyInitOverrides(config: SpecFlowConfig, options: InitTicketsStoreOptions): SpecFlowConfig {
+  return {
+    ...config,
+    ticketsFolder: options.ticketsFolder?.trim() || config.ticketsFolder,
+    ticketsFolderBase: options.ticketsFolderBase ?? config.ticketsFolderBase,
+  };
 }
 
 function ensureDir(dir: string): void {
@@ -193,13 +235,24 @@ function parseCheckpointValue(value: unknown): boolean {
 
 /**
  * Initialize the tickets filesystem store.
- * Reads config to determine the tickets folder and ensures it exists.
+ * Reads config to determine the tickets folder path.
  */
-export function initTicketsStore(cwd: string): void {
-  const config = loadConfig(cwd);
-  _ticketsFolder = resolve(cwd, config.ticketsFolder);
+export function initTicketsStore(
+  cwd: string,
+  sourceSpecPathOrOptions?: string | null | InitTicketsStoreOptions,
+): void {
+  const options: InitTicketsStoreOptions =
+    typeof sourceSpecPathOrOptions === "object" && sourceSpecPathOrOptions !== null
+      ? sourceSpecPathOrOptions
+      : { sourceSpecPath: sourceSpecPathOrOptions };
+  const latestContext = loadLatestPlanningContext(cwd);
+  if (options.sourceSpecPath === undefined) options.sourceSpecPath = latestContext?.sourceSpecPath;
+  if (options.ticketsFolder === undefined) options.ticketsFolder = latestContext?.ticketsFolder;
+  if (options.ticketsFolderBase === undefined) options.ticketsFolderBase = latestContext?.ticketsFolderBase;
+  const config = applyInitOverrides(loadConfig(cwd), options);
+  _ticketsFolder = resolveTicketsFolder(cwd, config, options.sourceSpecPath);
+  _useFeatureFolders = config.ticketsFolderBase !== "spec";
   _checkpointReviewConfig = config.checkpointReview;
-  ensureDir(_ticketsFolder);
 }
 
 /**
@@ -207,6 +260,15 @@ export function initTicketsStore(cwd: string): void {
  */
 export function ticketsExist(): boolean {
   return _ticketsFolder !== "" && existsSync(_ticketsFolder);
+}
+
+/**
+ * Ensure the resolved tickets root folder exists.
+ * Use from explicit init flows; passive session startup should not create folders.
+ */
+export function ensureTicketsStore(): void {
+  if (!_ticketsFolder) throw new Error("Tickets store not initialised. Call initTicketsStore(cwd) first.");
+  ensureDir(_ticketsFolder);
 }
 
 /**
@@ -245,6 +307,9 @@ export function featureFolderFromSpec(featureKey: string): string {
  */
 function featurePath(featureKey: string): string {
   if (!_ticketsFolder) throw new Error("Tickets store not initialised. Call initTicketsStore(cwd) first.");
+
+  ensureDir(_ticketsFolder);
+  if (!_useFeatureFolders) return _ticketsFolder;
   return resolve(_ticketsFolder, featureFolderFromSpec(featureKey));
 }
 
@@ -276,7 +341,9 @@ function nextId(featureFolder: string, allFolders?: string[]): number {
   let maxId = 0;
 
   // Search in all feature folders if we want a global ID
-  const foldersToSearch = allFolders
+  const foldersToSearch = !_useFeatureFolders
+    ? [_ticketsFolder]
+    : allFolders
     ? allFolders.map(f => resolve(_ticketsFolder, f))
     : [featureFolder];
 
@@ -539,6 +606,12 @@ function collectAllTickets(): Ticket[] {
 
   const tickets: Ticket[] = [];
 
+  for (const file of readdirSync(_ticketsFolder)) {
+    if (!file.endsWith(".md")) continue;
+    const ticket = parseTicket(join(_ticketsFolder, file));
+    if (ticket) tickets.push(ticket);
+  }
+
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
     if (!existsSync(entryPath)) continue;
@@ -560,6 +633,14 @@ function collectAllTickets(): Ticket[] {
  */
 function findTicketFile(id: number): string | null {
   if (!_ticketsFolder || !existsSync(_ticketsFolder)) return null;
+
+  for (const file of readdirSync(_ticketsFolder)) {
+    if (!file.endsWith(".md")) continue;
+    const ticket = parseTicket(join(_ticketsFolder, file));
+    if (ticket && ticket.id === id) {
+      return join(_ticketsFolder, file);
+    }
+  }
 
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
@@ -598,6 +679,8 @@ export function insertTicket(input: {
  */
 export function insertFullTicket(input: CreateTicketInput): Ticket {
   if (!_ticketsFolder) throw new Error("Tickets store not initialised. Call initTicketsStore(cwd) first.");
+
+  ensureDir(_ticketsFolder);
 
   const featureDir = featurePath(input.feature_key);
   ensureDir(featureDir);
@@ -774,7 +857,7 @@ export function ticketCountForSpec(featureKey: string): number {
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".md")) continue;
     const ticket = parseTicket(join(dir, file));
-    if (ticket) count += 1;
+    if (ticket && ticket.feature_key === featureKey) count += 1;
   }
 
   return count;
@@ -782,6 +865,11 @@ export function ticketCountForSpec(featureKey: string): number {
 
 export function clearTickets(): void {
   if (!_ticketsFolder || !existsSync(_ticketsFolder)) return;
+
+  for (const file of readdirSync(_ticketsFolder)) {
+    if (!file.endsWith(".md")) continue;
+    if (parseTicket(join(_ticketsFolder, file))) rmSync(join(_ticketsFolder, file));
+  }
 
   for (const entry of readdirSync(_ticketsFolder)) {
     const entryPath = resolve(_ticketsFolder, entry);
@@ -812,8 +900,11 @@ export function clearTicketsForSpec(featureKey: string): void {
 
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".md")) continue;
-    rmSync(join(dir, file));
+    const ticket = parseTicket(join(dir, file));
+    if (ticket?.feature_key === featureKey) rmSync(join(dir, file));
   }
+
+  if (!_useFeatureFolders) return;
 
   const remaining = readdirSync(dir);
   if (remaining.length === 0) {

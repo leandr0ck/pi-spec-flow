@@ -6,6 +6,8 @@ import { resolve, basename } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import {
   initTicketsStore,
+  ensureTicketsStore,
+  getSpecFlowConfig,
   ticketCountForSpec,
   clearTicketsForSpec,
 } from "../tickets-fs.js";
@@ -16,6 +18,7 @@ import {
   normalizeFeatureName,
   suggestFeatureNameFromSpec,
   parseSpecFlowInitArgs,
+  cleanSpecPathArg,
   toStoredSpecPath,
 } from "./command-helpers.js";
 
@@ -43,11 +46,14 @@ export function registerInitCommand(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const parsedInit = parseSpecFlowInitArgs(args);
       if (!parsedInit) {
-        ctx.ui.notify("Usage: /spec-flow-init <path-to-spec.md> [--feature \"feature-name\"]", "error");
+        ctx.ui.notify(
+          "Usage: /spec-flow-init <path-to-spec.md> [--feature \"feature-name\"] [--tickets-next-to-spec | --tickets-folder-base spec|cwd --tickets-folder <path>]",
+          "error",
+        );
         return;
       }
 
-      const normalizedArgs = parsedInit.specArg.trim().replace(/^@+/, "");
+      const normalizedArgs = cleanSpecPathArg(parsedInit.specArg);
       const specPath = resolve(ctx.cwd, normalizedArgs);
       let content: string;
       try {
@@ -62,8 +68,10 @@ export function registerInitCommand(pi: ExtensionAPI): void {
       let featureName = parsedInit.featureName
         ? normalizeFeatureName(parsedInit.featureName)
         : suggestFeatureNameFromSpec(content, specFile);
+      const config = getSpecFlowConfig(ctx.cwd);
+      const effectiveTicketsFolderBase = parsedInit.ticketsFolderBase ?? config.ticketsFolderBase;
 
-      if (!parsedInit.featureName) {
+      if (!parsedInit.featureName && effectiveTicketsFolderBase !== "spec") {
         const confirmed = await ctx.ui.confirm(
           "Confirm feature name",
           `No --feature flag provided. Suggested from spec title: "${featureName}". Use this name?`
@@ -89,8 +97,16 @@ export function registerInitCommand(pi: ExtensionAPI): void {
       }
 
       // Init tickets store
-      initTicketsStore(ctx.cwd);
-      savePlanningContext(ctx.cwd, featureName, storedSpecPath);
+      initTicketsStore(ctx.cwd, {
+        sourceSpecPath: storedSpecPath,
+        ticketsFolder: parsedInit.ticketsFolder,
+        ticketsFolderBase: parsedInit.ticketsFolderBase,
+      });
+      ensureTicketsStore();
+      savePlanningContext(ctx.cwd, featureName, storedSpecPath, {
+        ticketsFolder: parsedInit.ticketsFolder,
+        ticketsFolderBase: parsedInit.ticketsFolderBase,
+      });
 
       // Clear existing tickets if user confirms
       const existingCount = ticketCountForSpec(featureName);

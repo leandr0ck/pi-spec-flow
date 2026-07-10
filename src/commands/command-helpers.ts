@@ -12,12 +12,15 @@ import { updateTicket, type Ticket } from "../tickets-fs.js";
 export type SpecFlowInitArgs = {
   specArg: string;
   featureName: string | null;
+  ticketsFolder: string | null;
+  ticketsFolderBase: "cwd" | "spec" | null;
 };
 
 export type SpecFlowNextArgs = {
   ticketId: number | null;
   openInNewSession: boolean;
   feature: string | null;
+  specPath: string | null;
 };
 
 export type CheckpointReviewCommandArgs = {
@@ -62,6 +65,8 @@ export function parseSpecFlowInitArgs(rawArgs?: string): SpecFlowInitArgs | null
   const tokens = rawArgs.trim().split(/\s+/);
   let specArg: string | null = null;
   let featureName: string | null = null;
+  let ticketsFolder: string | null = null;
+  let ticketsFolderBase: "cwd" | "spec" | null = null;
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -78,24 +83,62 @@ export function parseSpecFlowInitArgs(rawArgs?: string): SpecFlowInitArgs | null
       continue;
     }
 
+    if (token.startsWith("--tickets-folder=")) {
+      ticketsFolder = token.slice("--tickets-folder=".length).trim() || null;
+      continue;
+    }
+
+    if (token === "--tickets-folder" && i + 1 < tokens.length) {
+      ticketsFolder = tokens[i + 1].trim() || null;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--tickets-folder-base=")) {
+      const value = token.slice("--tickets-folder-base=".length).trim();
+      if (value === "cwd" || value === "spec") ticketsFolderBase = value;
+      continue;
+    }
+
+    if (token === "--tickets-folder-base" && i + 1 < tokens.length) {
+      const value = tokens[i + 1].trim();
+      if (value === "cwd" || value === "spec") ticketsFolderBase = value;
+      i += 1;
+      continue;
+    }
+
+    if (token === "--tickets-next-to-spec") {
+      ticketsFolder = "./tickets";
+      ticketsFolderBase = "spec";
+      continue;
+    }
+
     if (!token.startsWith("-") && !specArg) {
       specArg = token;
     }
   }
 
   if (!specArg) return null;
-  return { specArg, featureName };
+  return { specArg, featureName, ticketsFolder, ticketsFolderBase };
+}
+
+export function cleanSpecPathArg(value: string): string {
+  return value
+    .trim()
+    .replace(/^['"]+|['"]+$/g, "")
+    .replace(/^@+/, "");
 }
 
 export function parseSpecFlowNextArgs(rawArgs?: string): SpecFlowNextArgs {
   if (!rawArgs || rawArgs.trim().length === 0) {
-    return { ticketId: null, openInNewSession: false, feature: null };
+    return { ticketId: null, openInNewSession: false, feature: null, specPath: null };
   }
 
   const tokens = rawArgs.trim().split(/\s+/);
   let ticketId: number | null = null;
   let openInNewSession = false;
   let feature: string | null = null;
+  let specPath: string | null = null;
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -115,17 +158,33 @@ export function parseSpecFlowNextArgs(rawArgs?: string): SpecFlowNextArgs {
       continue;
     }
 
+    if (token.startsWith("--spec=")) {
+      specPath = cleanSpecPathArg(token.slice("--spec=".length)) || null;
+      continue;
+    }
+
+    if (token === "--spec" && i + 1 < tokens.length) {
+      specPath = cleanSpecPathArg(tokens[i + 1]) || null;
+      i += 1;
+      continue;
+    }
+
     if (/^\d+$/.test(token)) {
       ticketId = Number(token);
       continue;
     }
 
     if (!token.startsWith("-")) {
+      const cleaned = cleanSpecPathArg(token);
+      if (cleaned.endsWith(".md") || cleaned.includes("/")) {
+        specPath = cleaned;
+        continue;
+      }
       feature = token;
     }
   }
 
-  return { ticketId, openInNewSession, feature };
+  return { ticketId, openInNewSession, feature, specPath };
 }
 
 export function parseCheckpointReviewCommandArgs(rawArgs?: string): CheckpointReviewCommandArgs {

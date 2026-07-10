@@ -16,6 +16,7 @@ import {
   loadCheckpointReviewSkillInstructions,
 } from "../checkpoint-review-subagent.js";
 import { appendDebugLog } from "../debug-log.js";
+import { loadPlanningContext } from "../planning-context.js";
 import {
   parseCheckpointReviewCommandArgs,
   resolveReviewModel,
@@ -26,8 +27,11 @@ export async function startFreshCheckpointReviewSession(
   args: string | undefined,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  initTicketsStore(ctx.cwd);
   const parsed = parseCheckpointReviewCommandArgs(args);
+  const sourceSpecPath = parsed.feature
+    ? loadPlanningContext(ctx.cwd, parsed.feature)?.sourceSpecPath
+    : null;
+  initTicketsStore(ctx.cwd, sourceSpecPath);
   if (parsed.ticketId == null) {
     ctx.ui.notify("Usage: /spec-flow-checkpoint-review <checkpoint-ticket-id> [--feature feature-key]", "error");
     return;

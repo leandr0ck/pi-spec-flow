@@ -7,6 +7,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import {
   initTicketsStore,
+  ensureTicketsStore,
   ticketsExist,
   insertFullTicket,
   listTickets,
@@ -256,17 +257,25 @@ export function registerTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      initTicketsStore(ctx.cwd);
+      const sourceSpecPath =
+        params.source_spec_path ??
+        loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath ??
+        undefined;
+      initTicketsStore(ctx.cwd, sourceSpecPath);
       if (!ticketsExist()) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No tickets store found. Ask the user to run /spec-flow-init first.",
-            },
-          ],
-          details: {},
-        };
+        if (sourceSpecPath) {
+          ensureTicketsStore();
+        } else {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No tickets store found. Ask the user to run /spec-flow-init first.",
+              },
+            ],
+            details: {},
+          };
+        }
       }
 
       const input: CreateTicketInput = {
@@ -274,10 +283,7 @@ export function registerTools(pi: ExtensionAPI): void {
         description: params.description,
         source_section: params.source_section,
         feature_key: params.feature_key,
-        source_spec_path:
-          params.source_spec_path ??
-          loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath ??
-          undefined,
+        source_spec_path: sourceSpecPath,
         acceptance_criteria: params.acceptance_criteria,
         verification: params.verification,
         dependencies: params.dependencies,
@@ -435,7 +441,7 @@ export function registerTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      initTicketsStore(ctx.cwd);
+      initTicketsStore(ctx.cwd, params.source_spec_path);
       if (!ticketsExist()) {
         return {
           content: [
@@ -635,7 +641,7 @@ export function registerTools(pi: ExtensionAPI): void {
         };
       }
 
-      initTicketsStore(ctx.cwd);
+      initTicketsStore(ctx.cwd, loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath);
       const ticket = getTicket(params.ticket_id);
       if (!ticket) {
         return {
@@ -809,7 +815,7 @@ export function registerTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      initTicketsStore(ctx.cwd);
+      initTicketsStore(ctx.cwd, loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath);
       if (!ticketsExist()) {
         return {
           content: [{ type: "text", text: "No tickets store found." }],
@@ -922,7 +928,10 @@ export function registerTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      initTicketsStore(ctx.cwd);
+      const sourceSpecPath = params.feature_key
+        ? loadPlanningContext(ctx.cwd, params.feature_key)?.sourceSpecPath
+        : null;
+      initTicketsStore(ctx.cwd, sourceSpecPath);
       if (!ticketsExist()) {
         return {
           content: [
