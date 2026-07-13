@@ -12,12 +12,13 @@ import {
   listTicketsForSpec,
   getTicket,
   getCheckpointReviewConfig,
+  getSpecFlowConfig,
   type Ticket,
 } from "../tickets-fs.js";
 import { getBlockForTicket, getPreviousCheckpointTicket, isFirstTicketOfBlock } from "../checkpoints.js";
 import { loadCheckpointHandoff, loadPreviousCheckpointHandoff } from "../checkpoint-handoffs.js";
 import { buildTicketKickoffMessage, buildBlockKickoffMessage } from "../prompt-builders.js";
-import { loadPlanningContext, loadPlanningContextBySpecPath } from "../planning-context.js";
+import { loadPlanningContext, loadPlanningContextBySpecPath, savePlanningContext } from "../planning-context.js";
 import {
   appendCommandOwnedImplementationChainToSession,
   recordCommandOwnedImplementationChain,
@@ -202,6 +203,19 @@ async function startImplementationByTicket(
   if (!ticket) {
     ctx.ui.notify("No ticket available for the selected feature.", "info");
     return;
+  }
+
+  // A caller can move a spec directory between planning and implementation
+  // (for example Forgium's ready → doing transition). Persist the explicitly
+  // requested path before the agent uses ticket tools, which initialise from
+  // this per-feature context on every tool call.
+  if (requestedSpecPath) {
+    const config = getSpecFlowConfig(ctx.cwd);
+    const context = specContext ?? featureContext;
+    savePlanningContext(ctx.cwd, ticket.feature_key, requestedSpecPath, {
+      ticketsFolder: context?.ticketsFolder ?? config.ticketsFolder,
+      ticketsFolderBase: context?.ticketsFolderBase ?? config.ticketsFolderBase,
+    });
   }
 
   const confirmed = await confirmSelectedImplementationTicket(ticket, ctx);
