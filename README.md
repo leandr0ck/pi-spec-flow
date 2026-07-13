@@ -130,6 +130,14 @@ That review session is intentionally separate from the implementation session. T
 
 After review, the flow stops. You decide what to do next.
 
+### 5. Inspect progress programmatically
+
+External orchestrators can use the read-only `spec_flow_status` tool, or the
+exported `inspectSpecFlowStatus(cwd, { featureKey, specPath })` API. It returns
+stable JSON with ticket counts, the next ticket, checkpoint review blockers,
+and a `complete` flag. It never creates a ticket store, changes ticket files,
+opens a session, or invokes a model.
+
 ## Configuration
 
 Recommended `spec-flow.config.json`:

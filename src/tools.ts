@@ -41,6 +41,7 @@ import {
   recordCheckpointHandoffSaved,
   recordImplementationTicketDone,
 } from "./implementation-flow-runner.js";
+import { inspectSpecFlowStatus } from "./status.js";
 
 type HandoffCheckResult = {
   field: string;
@@ -161,6 +162,41 @@ function normalizeSectionEntries(entries: string[]): string[] {
 // ── Tool registration ───────────────────────────────────────
 
 export function registerTools(pi: ExtensionAPI): void {
+  // ── spec_flow_status ─────────────────────────────────────
+
+  pi.registerTool({
+    name: "spec_flow_status",
+    label: "Spec Flow Status",
+    description:
+      "Inspect spec-flow ticket progress without changing tickets, creating a store, opening a session, or invoking a model.",
+    promptSnippet:
+      "spec_flow_status(feature_key?, spec_path?)",
+    promptGuidelines: [
+      "Use feature_key or spec_path when more than one feature exists.",
+      "Treat issues and pending checkpoint reviews as blockers before continuing implementation.",
+      "The result is read-only and returns stable JSON suitable for external orchestrators.",
+    ],
+    parameters: Type.Object({
+      feature_key: Type.Optional(
+        Type.String({ description: "Feature key to inspect" }),
+      ),
+      spec_path: Type.Optional(
+        Type.String({ description: "Source spec path to inspect" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const status = inspectSpecFlowStatus(ctx.cwd, {
+        featureKey: params.feature_key,
+        specPath: params.spec_path,
+      });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(status) }],
+        details: status,
+      };
+    },
+  });
+
   // ── spec_flow_create ──────────────────────────────────────
 
   pi.registerTool({

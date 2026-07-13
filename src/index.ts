@@ -18,6 +18,7 @@
  *   /spec-flow-start         — Alias of /spec-flow-implement
  *
  * Tools (for LLM):
+ *   spec_flow_status  — Read-only structured progress inspection
  *   spec_flow_create  — Create a ticket with full planning fields
  *   spec_flow_update  — Update ticket status (supports auto_next chaining)
  *   spec_flow_handoff_loop_done — Validate handoff and close ticket safely
@@ -27,6 +28,13 @@ import { registerCommands } from "./commands/index.js";
 import { registerTools } from "./tools.js";
 import { registerEvents } from "./events.js";
 import { registerCompactBuiltinToolRenderers } from "./builtin-tool-renderers.js";
+
+export {
+  inspectSpecFlowStatus,
+  type SpecFlowStatus,
+  type SpecFlowStatusNextTicket,
+  type SpecFlowStatusOptions,
+} from "./status.js";
 
 export default function (pi: ExtensionAPI) {
   registerCompactBuiltinToolRenderers(pi);
