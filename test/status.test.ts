@@ -108,6 +108,7 @@ describe("inspectSpecFlowStatus", () => {
     const checkpoint = insertFullTicket(ticketInput({
       title: "Checkpoint",
       is_checkpoint: true,
+      source_spec_path: "features/ready/checkout/spec.md",
       phase: "Foundation",
       order_index: 1,
     }));

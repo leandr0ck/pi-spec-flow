@@ -9,6 +9,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import {
   getCheckpointReviewConfig,
+  getSpecFlowConfig,
   getTicketsFolder,
   initTicketsStore,
   listTickets,
@@ -205,9 +206,18 @@ export function inspectSpecFlowStatus(
   let selectedFeature = featureContext?.featureKey ?? requestedFeature;
 
   if (requestedSpecPath) {
-    const specTickets = allTickets.filter(
-      (ticket) => toStoredSpecPath(cwd, ticket.source_spec_path ?? "") === requestedSpecPath,
-    );
+    const effectiveTicketsFolderBase = specContext?.ticketsFolderBase
+      ?? featureContext?.ticketsFolderBase
+      ?? getSpecFlowConfig(cwd).ticketsFolderBase;
+    // In spec-local mode the resolved ticket directory is already scoped by
+    // the requested spec. The persisted source path may refer to a previous
+    // repository lifecycle directory (for example ready/ → doing/), so it is
+    // not used as a second filter.
+    const specTickets = effectiveTicketsFolderBase === "spec"
+      ? allTickets
+      : allTickets.filter(
+        (ticket) => toStoredSpecPath(cwd, ticket.source_spec_path ?? "") === requestedSpecPath,
+      );
     const specFeatures = uniqueFeatureKeys(specTickets);
 
     if (specFeatures.length > 1) {
